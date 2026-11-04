@@ -1,0 +1,15 @@
+pandas
+numpy
+scikit-learn
+openpyxl
+supabase
+anthropic
+PyPDF2
+langchain_community
+langchain_experimental
+python-dotenv
+langchain_experimental
+sentence-transformers
+pinecone
+msvc-runtime
+pinecone
