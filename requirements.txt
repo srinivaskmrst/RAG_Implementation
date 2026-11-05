@@ -13,3 +13,5 @@ sentence-transformers
 pinecone
 msvc-runtime
 pinecone
+google-genai
+rank_bm25
