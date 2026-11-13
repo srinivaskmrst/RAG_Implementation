@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Playground</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <h1>RAG Playground</h1>
+        <p>Acme leave policy 2015–2026 · Traditional vs Hybrid RAG</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <a class="nav-btn" href="/ingest">⬆ Data Ingestion</a>
+      <div id="status" class="status loading"><span class="dot"></span><span id="statusText">Connecting…</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="ask card">
+      <form id="askForm">
+        <div class="model-row">
+          <div class="model-label-row">
+            <span class="label">LLM model <span class="muted">(pick one – Ollama or Google Gemini)</span></span>
+            <button type="button" id="modelRefresh" class="icon-btn" title="Reload both model lists">↻</button>
+          </div>
+          <div class="model-choices">
+            <div class="model-card ollama" id="cardOllama">
+              <label class="model-card-head">
+                <input type="radio" name="provider" value="ollama" id="useOllama">
+                <span class="radio-dot"></span>
+                <span><strong>Ollama</strong><small>open-source · runs on this laptop · no limit</small></span>
+              </label>
+              <select id="ollamaSelect" aria-label="Ollama model" disabled><option>Loading…</option></select>
+              <p class="model-hint muted" id="ollamaHint"></p>
+            </div>
+            <div class="model-card gemini" id="cardGemini">
+              <label class="model-card-head">
+                <input type="radio" name="provider" value="gemini" id="useGemini">
+                <span class="radio-dot"></span>
+                <span><strong>Google Gemini</strong><small>cloud API · fast · free-tier daily limit</small></span>
+              </label>
+              <select id="geminiSelect" aria-label="Google Gemini model" disabled><option>Loading…</option></select>
+              <p class="model-hint muted" id="geminiHint"></p>
+            </div>
+          </div>
+        </div>
+
+        <label for="question" class="label">Your question</label>
+        <textarea id="question" rows="3" placeholder="e.g. How many days of earned leave did employees get in 2019?" required></textarea>
+
+        <div class="samples" id="samples">
+          <span class="muted">Try:</span>
+          <button type="button" class="chip">How many days of earned leave did employees get in 2019?</button>
+          <button type="button" class="chip">Can I get days off when my dad is in hospital?</button>
+          <button type="button" class="chip">How did casual leave change between 2015 and 2026?</button>
+          <button type="button" class="chip">When was fertility treatment leave introduced?</button>
+        </div>
+
+        <div class="label">Retrieval settings <span class="muted">(top K)</span></div>
+        <div class="topk">
+          <label class="topk-field">
+            <span><strong>Keyword top K</strong><small>BM25 chunks · Hybrid</small></span>
+            <input type="number" id="keywordTopK" min="1" max="50" value="10" required>
+          </label>
+          <label class="topk-field">
+            <span><strong>Vector top K</strong><small>Pinecone chunks · both sections</small></span>
+            <input type="number" id="vectorTopK" min="1" max="50" value="10" required>
+          </label>
+          <label class="topk-field">
+            <span><strong>Final top K</strong><small>chunks sent to the LLM (after RRF / rerank)</small></span>
+            <input type="number" id="finalTopK" min="1" max="20" value="5" required>
+          </label>
+        </div>
+
+        <div class="label">Advanced techniques <span class="muted">(applied to the selected pipelines)</span></div>
+        <div class="options">
+          <label class="option rerank">
+            <input type="checkbox" id="optRerank">
+            <span class="opt-icon">⇅</span>
+            <span class="opt-text"><strong>Reranking</strong><small>Cross-encoder re-scores the retrieved chunks, keeps the final top K</small></span>
+            <span class="switch"></span>
+          </label>
+          <label class="option corrective">
+            <input type="checkbox" id="optCorrective">
+            <span class="opt-icon">✓</span>
+            <span class="opt-text"><strong>Corrective RAG</strong><small>Grades chunks, rewrites the query when nothing is relevant</small></span>
+            <span class="switch"></span>
+          </label>
+          <label class="option agentic">
+            <input type="checkbox" id="optAgentic">
+            <span class="opt-icon">✦</span>
+            <span class="opt-text"><strong>Agentic RAG</strong><small>LLM agent plans and calls search tools itself</small></span>
+            <span class="switch"></span>
+          </label>
+        </div>
+
+        <div class="label">Pipelines to run</div>
+        <div class="segmented" role="radiogroup" aria-label="Pipelines to run">
+          <label class="seg traditional">
+            <input type="radio" name="runMode" value="traditional">
+            <span>Traditional RAG only</span>
+          </label>
+          <label class="seg hybrid">
+            <input type="radio" name="runMode" value="hybrid">
+            <span>Hybrid RAG only</span>
+          </label>
+          <label class="seg both">
+            <input type="radio" name="runMode" value="both" checked>
+            <span>Both (side by side)</span>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="submit" id="askBtn" class="primary" disabled>Run both pipelines</button>
+          <span class="muted" id="hint">Ctrl + Enter to run</span>
+        </div>
+      </form>
+    </section>
+
+    <section class="results">
+      <article class="card result" id="traditional">
+        <header>
+          <div>
+            <h2>Traditional RAG</h2>
+            <p class="muted">Vector search (Pinecone) → LLM</p>
+          </div>
+          <div class="meta"></div>
+        </header>
+        <div class="body"><p class="placeholder">Run a question to see the answer here.</p></div>
+      </article>
+
+      <article class="card result" id="hybrid">
+        <header>
+          <div>
+            <h2>Hybrid RAG</h2>
+            <p class="muted">BM25 + vector, fused with RRF → LLM</p>
+          </div>
+          <div class="meta"></div>
+        </header>
+        <div class="body"><p class="placeholder">Run a question to see the answer here.</p></div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

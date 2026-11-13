@@ -15,3 +15,8 @@ msvc-runtime
 pinecone
 google-genai
 rank_bm25
+pypdf
+langchain-text-splitters
+torch
+fastapi
+uvicorn[standard]

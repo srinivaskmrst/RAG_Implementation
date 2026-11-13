@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Data Ingestion</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar ingest-bar">
+    <div class="brand">
+      <span class="logo">⬆</span>
+      <div>
+        <h1>Data Ingestion</h1>
+        <p>Leave_Policy documents → chunks → embeddings → Pinecone</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <a class="nav-btn" href="/">← Back to RAG Playground</a>
+      <div id="status" class="status loading"><span class="dot"></span><span id="statusText">Connecting…</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="ingest card">
+      <div class="ingest-head">
+        <div class="ingest-title">
+          <span class="ingest-icon">⬆</span>
+          <div>
+            <h2>Ingest documents</h2>
+            <p class="muted">Reads every PDF / TXT / MD file in the Leave_Policy folder, splits it into chunks,
+              creates embeddings and stores them in Pinecone.</p>
+          </div>
+        </div>
+        <button type="button" id="ingestBtn" class="ingest-btn" disabled>Ingest documents</button>
+      </div>
+
+      <ol class="hash-steps">
+        <li><strong>Document hash check</strong> – SHA-256 of the file. If this hash is already in the vector
+          database, the document is <span class="badge unchanged">unchanged</span> and skipped.</li>
+        <li><strong>Chunk hash check</strong> – for a <span class="badge new">new</span> or
+          <span class="badge changed">changed</span> document, every chunk's SHA-256 is its vector id: chunks
+          already in the database are skipped, only new chunks are embedded and inserted, outdated chunks are removed.</li>
+      </ol>
+
+      <div id="ingestResult"></div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/ingest.js"></script>
+</body>
+</html>
