@@ -503,3 +503,15 @@ summary:hover { filter: brightness(1.15); }
 .badge.plain-dark { background: var(--field); color: var(--muted); }
 
 .pos-legend { color: var(--rerank-text); font-weight: 800; }
+
+/* ---------- Agentic RAG: live web (Wikipedia) data ---------- */
+:root { --web: #0891b2; --web-soft: #dff5fa; }
+@media (prefers-color-scheme: dark) { :root { --web: #4fd1e8; --web-soft: #0f2d35; } }
+.steps li.web { --dot: var(--web); }
+.source.web { --edge: var(--web); background: var(--web-soft); }
+.source.web .head strong { color: var(--web); }
+.source.web a { font-size: 12px; font-weight: 700; color: var(--web); text-decoration: none; margin-left: auto; }
+.source.web a:hover { text-decoration: underline; }
+.badge.web { background: var(--web-soft); color: var(--web); border: 1px solid var(--web); }
+.answer .cite.web { background: linear-gradient(115deg, var(--web), var(--gem-1)); }
+.chip.agentic-chip { --c: var(--agentic-text); --cs: var(--agentic-soft); border: 1px dashed var(--agentic); }

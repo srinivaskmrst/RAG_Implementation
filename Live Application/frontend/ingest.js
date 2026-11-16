@@ -22,7 +22,7 @@ function renderIngest(report, title) {
 
   $("ingestResult").innerHTML = `
     <p class="ingest-meta"><strong>${esc(title)}</strong> · ${esc(s.finished_at)} · ${s.seconds}s ·
-      Pinecone namespace <code>${esc(s.namespace)}</code></p>
+      Pinecone index <code>${esc(s.index || "?")}</code> · namespace <code>${esc(s.namespace)}</code></p>
     <div class="stats">
       ${tile(s.documents, "Documents processed", "blue")}
       ${tile(s.new, "New documents", "violet")}
@@ -33,6 +33,7 @@ function renderIngest(report, title) {
       ${tile(s.chunks_existing, "Chunks already in DB", "green")}
       ${tile(s.chunks_removed, "Chunks removed", s.chunks_removed ? "red" : "grey")}
       ${tile(s.vectors_in_db, "Vectors in Pinecone", "blue")}
+      ${s.chunks_loaded_from_db != null ? tile(s.chunks_loaded_from_db, "Chunks loaded from DB for retrieval", "green") : ""}
     </div>
     <details open>
       <summary>Per-document details (${report.documents.length})</summary>

@@ -11,7 +11,8 @@ function markdown(md) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
-    .replace(/\[(Source \d+(?:,\s*Source \d+)*|HR-LV-\d{4}[^\]]*)\]/g, '<span class="cite">[$1]</span>');
+    .replace(/\[(Source \d+(?:,\s*Source \d+)*|HR-LV-\d{4}[^\]]*)\]/g, '<span class="cite">[$1]</span>')
+    .replace(/\[(Wikipedia:[^\]]+)\]/g, '<span class="cite web">[$1]</span>');
 
   const out = [];
   let list = null;
@@ -157,6 +158,8 @@ function options() {
   return {
     provider: activeProvider,
     model: activeProvider ? $(`${activeProvider}Select`).value : null,
+    // Agentic RAG (AgenticRAG.py) always uses Google Gemini: send the Gemini dropdown's model
+    gemini_model: $("geminiSelect").disabled ? null : $("geminiSelect").value,
     rerank: $("optRerank").checked,
     corrective: $("optCorrective").checked,
     agentic: $("optAgentic").checked,
@@ -178,11 +181,15 @@ function techniqueBadges(opts) {
 
 // ---------------------------------------------------------------- rendering
 function renderLoading(section, opts) {
-  setMeta(section, (opts.model ? `<span class="badge model ${esc(opts.provider)}">${esc(opts.model)}</span>` : "") + techniqueBadges(opts));
+  // Agentic RAG always runs on the model in the Gemini dropdown
+  const provider = opts.agentic ? "gemini" : opts.provider;
+  const model = opts.agentic ? opts.gemini_model : opts.model;
+  setMeta(section, (model ? `<span class="badge model ${esc(provider)}">${esc(model)}</span>` : "") + techniqueBadges(opts));
   section.querySelector(".body").innerHTML = `
     <div class="skeleton"><span></span><span></span><span></span></div>
-    <p class="running">Running pipeline${opts.agentic ? " (agent may search several times)" : ""}…</p>
-    ${opts.provider === "ollama" ? `<p class="running muted">Local model on CPU: this can take ${
+    <p class="running">Running pipeline${opts.agentic
+      ? " – Gemini agent is searching the company policy and live Wikipedia" : ""}…</p>
+    ${provider === "ollama" ? `<p class="running muted">Local model on CPU: this can take ${
       opts.agentic || opts.corrective ? "a few minutes" : "up to a minute"}.</p>` : ""}`;
 }
 
@@ -263,7 +270,16 @@ function renderResult(section, r) {
     </li>`).join("");
 
   const gradeClass = { relevant: "ok", partial: "warn", irrelevant: "bad" };
-  const sources = r.sources.map((s, i) => `
+  const sources = r.sources.map((s, i) => s.kind === "web" ? `
+    <div class="source web">
+      <div class="head">
+        <strong>[${i + 1}] 🌐 Wikipedia: ${esc(s.title)}</strong>
+        <span class="badge web">live web API</span>
+        ${/^https:\/\/[a-z]+\.wikipedia\.org\//.test(s.url || "")
+          ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">open article ↗</a>` : ""}
+      </div>
+      <p>${esc(s.text)}…</p>
+    </div>` : `
     <div class="source ${esc(s.grade || "")}">
       <div class="head">
         <strong>[${i + 1}] Leave Policy ${s.year} · p.${s.page}</strong>
@@ -358,7 +374,11 @@ $("question").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(e);
 });
 document.querySelectorAll("#samples .chip").forEach((chip) =>
-  chip.addEventListener("click", () => { $("question").value = chip.textContent; $("question").focus(); }));
+  chip.addEventListener("click", () => {
+    $("question").value = chip.textContent.replace(/^✦\s*/, "");
+    if (chip.classList.contains("agentic-chip")) $("optAgentic").checked = true;   // needs the agent
+    $("question").focus();
+  }));
 
 for (const p of PROVIDERS) {
   $(`${p}Select`).addEventListener("change", () => setActive(p));       // picking a model selects its card

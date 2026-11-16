@@ -9,25 +9,21 @@ Optional techniques the user can switch on (applied to BOTH sections):
     rerank      : re-order the retrieved candidates with a cross-encoder, keep the best final_top_k
     corrective  : grade every retrieved chunk (relevant / partial / irrelevant); if nothing is
                   relevant, rewrite the question and search again (Corrective RAG)
-    agentic     : an LLM agent with tools decides what to search (and for which year),
-                  can search several times / read full pages, then answers (Agentic RAG).
-                  Its search tool uses the section's retriever (+ rerank / grading if selected).
+    agentic     : AgenticRAG.py - a Google Gemini agent that decides itself which tools to call:
+                  the company leave policy (this section's retriever, + rerank / grading if
+                  selected) and live Wikipedia data through its public API (Agentic RAG).
 """
 
 import time
 
-from google.genai import types
-
-import json
-
-from rag_core import kb, years_in, parse_json, LLM_PROVIDER, model_label, default_model
+from rag_core import kb, years_in, parse_json, LLM_PROVIDER, GEMINI_MODEL, model_label, default_model
+from AgenticRAG import run_agent
 
 # defaults only - the UI sends the top-K values with every question
 DEFAULT_KEYWORD_TOP_K = 10
 DEFAULT_VECTOR_TOP_K = 10
 DEFAULT_FINAL_TOP_K = 5
 MAX_REWRITES = 2
-AGENT_MAX_STEPS = 8
 
 GRADE_ORDER = {"relevant": 2, "partial": 1, "irrelevant": 0}
 
@@ -229,207 +225,22 @@ Question: {question}"""
     return answer
 
 
-# ---------------------------------------------------------------------------- agentic
-AGENT_PROMPT = """You are an HR assistant for Acme Technologies India Pvt. Ltd. You answer employee
-questions about the company leave policy using ONLY the policy documents, reached through your tools.
-There is one leave policy per calendar year (2015-2026); entitlements change from year to year.
-
-How to work:
-1. Plan: work out which leave type(s) and which year(s) the question is about. If no year is
-   given, assume the current policy (2026) and say so.
-2. Retrieve: call search_leave_policy with focused queries in formal policy wording, using the
-   year filter whenever a year is known. For comparisons across years, use
-   list_policy_documents for the headline CL/SL/EL numbers and issue the per-year searches
-   you need IN THE SAME TURN (several tool calls at once), not one year per turn.
-   You have a limited number of tool rounds, so be efficient.
-3. Reflect: if the passages do not answer the question, rephrase, try another year, or read the
-   full page with read_policy_page. Do not stop at a weak result.
-4. Answer: be concise, give exact numbers and conditions, and cite every fact as
-   [HR-LV-YYYY, p.N]. If the documents do not contain the answer, say so - never guess."""
-
-
-def make_tools(run, question, seen):
-    """The agent's three tools. 'seen' collects every passage the agent looked at (sources panel)."""
-
-    def list_policy_documents() -> dict:
-        """List every leave policy document: year, document id, effective dates and the
-        headline Casual (CL), Sick (SL) and Earned (EL) leave entitlements."""
-        run.step("Tool: list_policy_documents", kind="tool")
-        return {"documents": [{k: d[k] for k in ("year", "doc_id", "effective_from", "effective_to",
-                                                  "cl", "sl", "el")} for d in kb.manifest]}
-
-    def search_leave_policy(query: str, year: int = 0) -> dict:
-        """Search the company leave policy documents (one PDF per year, 2015-2026) and return
-        the most relevant passages with their year and page.
-
-        Args:
-            query: What to look for, in policy wording, e.g. "earned leave carry forward limit".
-            year: Policy year to restrict the search to (e.g. 2019). Use 0 to search all years.
-        """
-        try:
-            year = int(year or 0)
-        except (TypeError, ValueError):     # small models sometimes send "all" or "2019 policy"
-            found = years_in(str(year))
-            year = found.pop() if found else 0
-        run.step("Tool: search_leave_policy", f"query=“{query}”, year={year or 'all'}", kind="tool")
-        if year and year not in kb.years:
-            return {"error": f"No policy for {year}. Available years: {kb.years}"}
-        chunks = retrieve(run, str(query), year=year or None)
-        if run.options.get("corrective"):      # self-corrective agent: hand back only graded-useful chunks
-            chunks = [c for c in grade_chunks(run, question, chunks) if c["grade"] != "irrelevant"]
-            if not chunks:
-                return {"results": [], "note": "No relevant passages. Rephrase the query or try another year."}
-        for c in chunks:
-            seen.setdefault(c["id"], c)
-        return {"results": [{"source": c["label"], "year": c["year"], "page": c["page"],
-                             "grade": c.get("grade"), "text": c["text"].split(": ", 1)[-1]}
-                            for c in chunks]}
-
-    def read_policy_page(year: int, page: int) -> dict:
-        """Return the full text of one page of a leave policy PDF, for more context.
-
-        Args:
-            year: Policy year, e.g. 2022.
-            page: Page number, starting at 1.
-        """
-        year, page = int(year), int(page)
-        run.step("Tool: read_policy_page", f"year={year}, page={page}", kind="tool")
-        for p in kb.pages:
-            if p["year"] == year and p["page"] == page:
-                return {"source": f"Leave Policy {year} ({p['doc_id']}), page {page}", "text": p["text"]}
-        return {"error": f"Page {page} of {year} not found."}
-
-    return {f.__name__: f for f in (list_policy_documents, search_leave_policy, read_policy_page)}
-
-
-def call_tool(tools, name, args):
-    if name not in tools:
-        return {"error": f"Unknown tool '{name}'. Use one of: {', '.join(tools)}"}
-    try:
-        return tools[name](**(args if isinstance(args, dict) else {}))
-    except Exception as e:  # report tool errors back to the model so it can recover
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
-def gemini_agent(run, question, tools):
-    """Gemini with native function calling."""
-    config = types.GenerateContentConfig(
-        system_instruction=AGENT_PROMPT, temperature=0, tools=list(tools.values()),
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
-    history = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
-    run.step("Agent planning", f"{run.label} with 3 tools, max {AGENT_MAX_STEPS} rounds", kind="llm")
-
-    for _ in range(AGENT_MAX_STEPS):
-        run.llm_calls += 1
-        response = kb.generate(history, config, model=run.model)
-        history.append(response.candidates[0].content)
-        if not response.function_calls:
-            return response.text
-        parts = [types.Part.from_function_response(
-                     name=fc.name, response=call_tool(tools, fc.name, dict(fc.args or {})))
-                 for fc in response.function_calls]
-        history.append(types.Content(role="user", parts=parts))
-    return None
-
-
-JSON_AGENT_PROMPT = """You are an HR assistant for Acme Technologies India Pvt. Ltd. You answer questions
-about the company leave policy. There is one policy document per year (2015-2026) and the rules change
-from year to year. You can only learn what the policy says by using tools.
-
-Tools:
-- search_leave_policy   args: {"query": "<search words>", "year": <policy year, or 0 for all years>}
-- read_policy_page      args: {"year": <policy year>, "page": <page number>}
-- list_policy_documents args: {}   (headline Casual, Sick and Earned leave days for every year)
-
-Reply with ONE JSON object and nothing else.
-To use a tool: {"thought": "<short reasoning>", "action": "<tool name>", "args": {...}}
-To finish:     {"thought": "<short reasoning>", "action": "final_answer", "answer": "<your answer>"}
-
-Rules: always search before answering. Use the year filter when the question names a year; if no
-year is given, use 2026 and say so. Give exact numbers and conditions and cite facts as
-[HR-LV-YYYY, p.N]. If the documents do not contain the answer, say so - never guess."""
-
-JSON_AGENT_MAX_STEPS = 5   # local CPU models are slow, keep the loop short
-
-
-def compact(result):
-    """Shorten tool results so they fit in a small model's context window."""
-    if "results" in result:
-        return {**result, "results": [{**r, "text": r["text"][:600]} for r in result["results"][:4]]}
-    if "text" in result:
-        return {**result, "text": result["text"][:2000]}
-    return result
-
-
-def json_agent(run, question, tools):
-    """Prompt-based agent for open-source models without native tool calling (Ollama):
-    the model replies with a JSON action, we run the tool and send back the observation."""
-    messages = [{"role": "system", "content": JSON_AGENT_PROMPT},
-                {"role": "user", "content": f"Question: {question}"}]
-    run.step("Agent planning", f"{run.label} with 3 tools (JSON actions), max {JSON_AGENT_MAX_STEPS} rounds",
-             kind="llm")
-    used_tool = False
-
-    for _ in range(JSON_AGENT_MAX_STEPS):
-        run.llm_calls += 1
-        raw = kb.chat(messages, as_json=True, model=run.model)
-        messages.append({"role": "assistant", "content": raw})
-        reply = parse_json(raw, default={})
-        if not isinstance(reply, dict):
-            reply = {}
-        action = str(reply.get("action") or "").strip()
-        args = reply.get("args") if isinstance(reply.get("args"), dict) else {}
-        if reply.get("thought"):
-            run.step("Agent thought", str(reply["thought"])[:200], kind="llm")
-
-        if action == "final_answer" or (not action and reply.get("answer")):
-            answer = reply.get("answer") or args.get("answer")
-            if not used_tool:      # small models like to answer from memory - make it search first
-                messages.append({"role": "user", "content": "You have not searched the documents yet. "
-                                 "Use search_leave_policy first, then answer."})
-                continue
-            if answer:
-                return answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
-
-        if action in tools:
-            used_tool = True
-            observation = compact(call_tool(tools, action, args))
-            messages.append({"role": "user", "content": "Observation: " + json.dumps(observation, ensure_ascii=False)
-                             + "\nReply with the next JSON object (another tool, or final_answer)."})
-        else:
-            messages.append({"role": "user", "content": 'Invalid reply. Reply with ONE JSON object with '
-                             '"action" set to a tool name or "final_answer".'})
-    return None
-
-
-def agentic_answer(run, question):
-    seen = {}   # chunk id -> chunk, for the sources panel
-    tools = make_tools(run, question, seen)
-    answer = gemini_agent(run, question, tools) if run.provider == "gemini" else json_agent(run, question, tools)
-
-    sources = list(seen.values())
-    if answer and answer.strip():
-        run.step("Agent answered", kind="ok")
-        return answer, sources
-
-    # step limit reached (or empty reply): answer from everything the agent has gathered so far
-    run.step("Step limit reached", f"answering from the {len(sources)} passages gathered", kind="warn")
-    if not sources:
-        sources = retrieve(run, question)      # the agent never searched: fall back to plain RAG
-    sources.sort(key=lambda c: (c["year"], c["page"]))
-    return generate_answer(run, question, sources), sources
-
-
 # ---------------------------------------------------------------------------- entry point
 def run_pipeline(mode, question, options):
+    if options.get("agentic"):
+        # Agentic RAG always runs on Google Gemini (function calling): use the model chosen in
+        # the Gemini dropdown, even when the Ollama card is active for the other options
+        options = {**options, "provider": "gemini",
+                   "model": options.get("gemini_model") or GEMINI_MODEL}
     run = Run(mode, options)
     techniques = [name for name, on in (("Rerank", options.get("rerank")),
                                         ("Corrective", options.get("corrective")),
                                         ("Agentic", options.get("agentic"))) if on]
     verdict = None
+    web_sources = []
 
     if options.get("agentic"):
-        answer, sources = agentic_answer(run, question)
+        answer, sources, web_sources = run_agent(run, question, retrieve, grade_chunks, generate_answer)
     elif options.get("corrective"):
         sources, verdict = corrective_retrieve(run, question)
         if not sources:
@@ -454,7 +265,9 @@ def run_pipeline(mode, question, options):
                      "score": c.get("score"), "score_name": c.get("score_name"),
                      "grade": c.get("grade"),
                      "text": c.get("evidence") or c["text"].split(": ", 1)[-1]}
-                    for c in sources],
+                    for c in sources]
+                   + [{"kind": "web", "title": w["title"], "url": w["url"], "text": w["text"]}
+                      for w in web_sources],
         "llm_calls": run.llm_calls,
         "seconds": round(time.perf_counter() - run.started, 2),
         "years_asked": sorted(years_in(question)),

@@ -1,19 +1,23 @@
 """
-Incremental ingestion: documents -> chunks -> embeddings -> Pinecone, with two hash checks.
+Incremental ingestion: Leave_Policy documents -> chunks -> embeddings -> Pinecone (live-rag-app).
 
-1. Document hash = SHA-256 of the file's bytes. It is stored in the metadata of every chunk of
-   that document ("doc_hash"). If Pinecone already holds vectors with this doc_hash, the document
-   is unchanged and is skipped completely (no embedding, no upload).
+Pinecone is the single store the app reads from. Every vector carries ALL the data retrieval
+needs in its metadata (see chunk_metadata): the chunk text, its year / page / document, the
+document's headline entitlements and, on the first chunk of every page, the full page text.
+After ingestion the app reloads its chunks FROM PINECONE (KnowledgeBase.reload_from_pinecone).
+
+Two hash checks keep ingestion incremental:
+
+1. Document hash = SHA-256 of the file's bytes, stored as "doc_hash" on every chunk of that
+   document. If Pinecone already holds vectors with this doc_hash (and the current metadata
+   schema), the document is unchanged and is skipped completely.
 
 2. Chunk hash = SHA-256 of the chunk text, used as the vector id. When a document is new or its
    hash changed, every chunk id is looked up in Pinecone:
-     - chunk id already in Pinecone  -> skipped (only its metadata is pointed at the new doc_hash)
+     - chunk id already in Pinecone  -> not embedded again; only its metadata is refreshed
      - chunk id not in Pinecone      -> embedded and inserted
      - old chunk of this document that no longer exists in the new version -> deleted
    Vectors of files that were removed from the folder are deleted as well.
-
-Search keeps working during ingestion: the new in-memory chunks / BM25 index are swapped in at
-the end (see KnowledgeBase.ingest in rag_core.py).
 """
 
 import hashlib
@@ -30,6 +34,8 @@ from rag_core import DATA_FOLDER, NAMESPACE, CHUNK_SIZE, CHUNK_OVERLAP
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
 BATCH = 100              # Pinecone upsert / fetch / delete batch size
 MAX_IDS = 10_000         # Pinecone top_k limit when values and metadata are not returned
+SCHEMA_VERSION = 2       # bump when the metadata layout changes -> documents are re-processed
+DOC_FIELDS = ("effective_from", "effective_to", "cl", "sl", "el")   # headline info from manifest.json
 
 
 def sha256(data):
@@ -48,21 +54,21 @@ def read_pages(path):
 
 
 def describe(path, text, manifest):
-    """Year and document id: from manifest.json, else detected from the file name / text."""
+    """Year, document id and headline info: from manifest.json, else detected from name / text."""
     entry = manifest.get(path.name)
     if entry:
-        return int(entry["year"]), entry["doc_id"]
+        return int(entry["year"]), entry["doc_id"], {k: str(entry[k]) for k in DOC_FIELDS if entry.get(k)}
     in_name = re.search(r"(?:19|20)\d{2}", path.stem)                     # Leave_Policy_2019.pdf
     in_text = re.search(r"Policy year\s*((?:19|20)\d{2})", text)          # "Policy year 2019"
     year = int(in_name.group(0)) if in_name else int(in_text.group(1)) if in_text else 0
     doc_id = re.search(r"HR-LV-\d{4}", text)
-    return year, doc_id.group(0) if doc_id else path.stem
+    return year, doc_id.group(0) if doc_id else path.stem, {}
 
 
 def make_chunks(path, year, doc_id, pages, splitter):
     chunks, ids = [], set()
     for page_no, text in pages:
-        for piece in splitter.split_text(text):
+        for i, piece in enumerate(splitter.split_text(text)):
             label = f"Leave Policy {year} ({doc_id}), page {page_no}"
             full_text = f"{label}: {piece}"            # label inside the text so both searches see the year
             chunk_id = "c-" + sha256(full_text)[:40]   # chunk hash = vector id
@@ -70,8 +76,20 @@ def make_chunks(path, year, doc_id, pages, splitter):
                 continue
             ids.add(chunk_id)
             chunks.append({"id": chunk_id, "year": year, "page": page_no, "doc_id": doc_id,
-                           "source": path.name, "label": label, "text": full_text})
+                           "source": path.name, "label": label, "text": full_text,
+                           "chunk_index": i,
+                           "page_text": text if i == 0 else None})   # full page on the first chunk
     return chunks
+
+
+def chunk_metadata(c, doc_hash, doc_info):
+    """Everything retrieval needs, stored with the vector in Pinecone (no None values allowed)."""
+    meta = {"text": c["text"], "label": c["label"], "year": c["year"], "page": c["page"],
+            "doc_id": c["doc_id"], "source": c["source"], "chunk_index": c["chunk_index"],
+            "doc_hash": doc_hash, "schema_version": SCHEMA_VERSION, **doc_info}
+    if c["page_text"]:
+        meta["page_text"] = c["page_text"]
+    return meta
 
 
 # ---------------------------------------------------------------------------- Pinecone helpers
@@ -90,13 +108,12 @@ def existing_ids(kb, ids):
     return found
 
 
-def upsert_chunks(kb, chunks, doc_hash):
+def upsert_chunks(kb, chunks, doc_hash, doc_info):
     if not chunks:
         return
     vectors = kb.embed([c["text"] for c in chunks])
     records = [{"id": c["id"], "values": vectors[i].tolist(),
-                "metadata": {"year": c["year"], "page": c["page"], "doc_id": c["doc_id"],
-                             "source": c["source"], "doc_hash": doc_hash}}
+                "metadata": chunk_metadata(c, doc_hash, doc_info)}
                for i, c in enumerate(chunks)]
     for start in range(0, len(records), BATCH):
         kb.index.upsert(vectors=records[start:start + BATCH], namespace=NAMESPACE)
@@ -120,12 +137,12 @@ def run_ingestion(kb, log=print):
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     probe = kb.embed(["leave policy"])[0].tolist()   # any vector works for filter-only queries
 
-    documents, all_pages, all_chunks, hash_to_file = [], [], [], {}
+    documents, total_pages, total_chunks, hash_to_file = [], 0, 0, {}
 
     for path in files:
         doc_hash = sha256(path.read_bytes())
         pages = read_pages(path)
-        year, doc_id = describe(path, "\n".join(t for _, t in pages), manifest)
+        year, doc_id, doc_info = describe(path, "\n".join(t for _, t in pages), manifest)
         row = {"file": path.name, "year": year, "doc_id": doc_id, "doc_hash": doc_hash[:12],
                "pages": len(pages), "chunks": 0, "added": 0, "existing": 0, "removed": 0,
                "status": "", "note": ""}
@@ -138,33 +155,35 @@ def run_ingestion(kb, log=print):
 
         chunks = make_chunks(path, year, doc_id, pages, splitter)
         row["chunks"] = len(chunks)
-        all_pages += [{"year": year, "doc_id": doc_id, "page": n, "text": t, "source": path.name}
-                      for n, t in pages]
-        all_chunks += chunks
+        total_pages += len(pages)
+        total_chunks += len(chunks)
 
-        # ---- check 1: document hash
-        if ids_matching(kb, probe, {"doc_hash": {"$eq": doc_hash}}, top_k=1):
+        # ---- check 1: document hash (+ current metadata schema)
+        if ids_matching(kb, probe, {"doc_hash": {"$eq": doc_hash},
+                                    "schema_version": {"$eq": SCHEMA_VERSION}}, top_k=1):
             row.update(status="unchanged", existing=len(chunks),
                        note="Document hash already in vector DB - skipped")
             log(f"  {path.name}: unchanged")
             continue
 
-        # ---- check 2: chunk hashes (document is new or changed)
+        # ---- check 2: chunk hashes (document is new, changed, or stored with an old schema)
         previous = {m.id for m in ids_matching(kb, probe, {"source": {"$eq": path.name}})}
         chunk_ids = [c["id"] for c in chunks]
         already = existing_ids(kb, chunk_ids)
         new_chunks = [c for c in chunks if c["id"] not in already]
 
-        upsert_chunks(kb, new_chunks, doc_hash)
-        for chunk_id in already:         # same chunk text: keep the vector, link it to the new doc hash
-            kb.index.update(id=chunk_id, set_metadata={"doc_hash": doc_hash, "source": path.name},
-                            namespace=NAMESPACE)
+        upsert_chunks(kb, new_chunks, doc_hash, doc_info)
+        for c in chunks:                 # same chunk text: keep the vector, refresh its metadata
+            if c["id"] in already:
+                kb.index.update(id=c["id"], set_metadata=chunk_metadata(c, doc_hash, doc_info),
+                                namespace=NAMESPACE)
         stale = previous - set(chunk_ids)
         delete_ids(kb, stale)
 
         status = "changed" if previous else "new"
         row.update(status=status, added=len(new_chunks), existing=len(already), removed=len(stale),
                    note=(f"{len(new_chunks)} new chunks embedded, {len(already)} already in vector DB"
+                         + (" (metadata refreshed)" if already else "")
                          + (f", {len(stale)} outdated chunks removed" if stale else "")))
         log(f"  {path.name}: {status} (+{len(new_chunks)} / ={len(already)} / -{len(stale)})")
 
@@ -174,21 +193,20 @@ def run_ingestion(kb, log=print):
     delete_ids(kb, orphans)
 
     # Pinecone is eventually consistent: wait briefly until the count matches
-    expected = len(all_chunks)
     vectors = kb.count_vectors()
     for _ in range(15):
-        if vectors == expected:
+        if vectors == total_chunks:
             break
         time.sleep(2)
         vectors = kb.count_vectors()
 
     count = lambda status: sum(d["status"] == status for d in documents)
-    summary = {
+    return {"summary": {
         "documents": len(documents),
         "new": count("new"), "changed": count("changed"),
         "unchanged": count("unchanged"), "duplicate": count("duplicate"),
-        "pages": len(all_pages),
-        "chunks": len(all_chunks),
+        "pages": total_pages,
+        "chunks": total_chunks,
         "chunks_added": sum(d["added"] for d in documents),
         "chunks_existing": sum(d["existing"] for d in documents),
         "chunks_removed": sum(d["removed"] for d in documents) + len(orphans),
@@ -197,6 +215,5 @@ def run_ingestion(kb, log=print):
         "seconds": round(time.perf_counter() - started, 2),
         "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "namespace": NAMESPACE,
-    }
-    state = {"manifest": manifest_list, "pages": all_pages, "chunks": all_chunks}
-    return {"summary": summary, "documents": documents}, state
+        "index": getattr(kb, "index_name", ""),
+    }, "documents": documents}

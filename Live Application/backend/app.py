@@ -52,6 +52,8 @@ class AskRequest(BaseModel):
     # the ONE model picked in the UI: provider = which dropdown, model = its selected value
     provider: Literal["ollama", "gemini"] | None = None
     model: str | None = Field(None, max_length=100)
+    # model in the Gemini dropdown - Agentic RAG (AgenticRAG.py) always runs on Google Gemini
+    gemini_model: str | None = Field(None, max_length=100)
 
 
 @app.get("/api/models")
@@ -90,6 +92,9 @@ def status():
         "chunks": len(kb.chunks),
         "years": kb.years,
         "ingesting": kb.ingesting,
+        "index": kb.index_name,
+        "vectors": kb.vector_count,
+        "needs_ingestion": kb.needs_ingestion,
         "last_ingest": kb.last_ingest,
     }
 
@@ -112,11 +117,15 @@ def ask(mode: str, req: AskRequest):   # plain def -> FastAPI runs it in a worke
         raise HTTPException(404, "mode must be 'traditional' or 'hybrid'")
     if not kb.ready:
         raise HTTPException(503, kb.error or f"Knowledge base is still loading ({kb.status})")
-    provider = req.provider or LLM_PROVIDER
+    if not kb.chunks:
+        raise HTTPException(400, f"The vector database (Pinecone index '{kb.index_name}') is empty. "
+                                 "Open Data Ingestion and click 'Ingest documents' first.")
+    provider = "gemini" if req.agentic else (req.provider or LLM_PROVIDER)
     if provider == "ollama" and req.model and not kb.is_installed(req.model):
         raise HTTPException(400, f"Model '{req.model}' is not downloaded. Run: ollama pull {req.model}")
     if provider == "gemini" and not kb.client:
-        raise HTTPException(400, "Google Gemini is not configured: add GEMINI_API_KEY to .env")
+        raise HTTPException(400, ("Agentic RAG runs on Google Gemini: " if req.agentic else "Google Gemini is "
+                                  "not configured: ") + "add GEMINI_API_KEY to .env")
     try:
         return run_pipeline(mode, req.question.strip(), req.model_dump(exclude={"question"}))
     except Exception as e:
@@ -129,7 +138,8 @@ def ask(mode: str, req: AskRequest):   # plain def -> FastAPI runs it in a worke
                                      + (f". Try again in about {wait}{'' if wait[-1] in 'hm' else 's'}."
                                         if wait else ". Try again later."))
         if getattr(e, "code", None) == 404 and provider == "gemini":
-            raise HTTPException(400, f"Gemini model '{req.model}' is not available for this API key.")
+            name = req.gemini_model if req.agentic else req.model
+            raise HTTPException(400, f"Gemini model '{name}' is not available for this API key.")
         if getattr(e, "code", None) == 503:
             raise HTTPException(503, "Gemini is overloaded right now. Please try again in a minute.")
         raise HTTPException(500, f"{type(e).__name__}: {text[:500]}")

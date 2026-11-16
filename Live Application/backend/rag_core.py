@@ -36,6 +36,13 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 DATA_FOLDER = Path(__file__).resolve().parents[2] / "Leave_Policy"
 NAMESPACE = "live-app-hashed"   # own namespace (hash-based ids), does not touch the notebooks' data
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_DIM = 384                                     # all-MiniLM-L6-v2 vector size
+
+# ---- Pinecone index used by this app (override in .env) ----
+# The app gets its OWN index: if it does not exist it is created automatically at startup.
+PINECONE_INDEX = os.getenv("LIVE_APP_PINECONE_INDEX", "live-rag-app")
+PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
+PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
 RERANK_MODEL = "BAAI/bge-reranker-base"
 
 # ---- LLM settings (override in .env) ----
@@ -121,6 +128,9 @@ class KnowledgeBase:
         self.status = "starting"
         self.ingesting = False
         self.last_ingest = None
+        self.index_name = PINECONE_INDEX
+        self.vector_count = 0
+        self.needs_ingestion = True             # set by reload_from_pinecone()
         self.manifest, self.pages, self.chunks, self.chunk_by_id, self.years = [], [], [], {}, []
         self._keyword = ([], None)               # (chunks, BM25 index) - swapped together
         self._model_lock = threading.Lock()     # torch models are shared between request threads
@@ -129,7 +139,7 @@ class KnowledgeBase:
     # ------------------------------------------------------------------ loading
     def load(self):
         try:
-            needed = ["PineCone_API_Key", "Pinecone_Index_Name"]
+            needed = ["PineCone_API_Key"]          # the index itself is created if missing
             if LLM_PROVIDER == "gemini":
                 needed.append("GEMINI_API_KEY")
             missing = [k for k in needed if not env(k)]
@@ -143,8 +153,10 @@ class KnowledgeBase:
             self.embedder = SentenceTransformer(EMBED_MODEL)
             self.status = "connecting to Pinecone"
             self._connect_pinecone()
-            self.status = "ingesting documents (hash check)"
-            self.ingest()
+            # all retrieval data comes from the vector database - nothing is read from the PDFs here
+            # (documents get into Pinecone only through the Data Ingestion page)
+            self.status = f"loading chunks from Pinecone index '{self.index_name}'"
+            self.reload_from_pinecone()
             self.status = "loading reranker"
             import torch
             self.reranker = CrossEncoder(RERANK_MODEL, activation_fn=torch.nn.Sigmoid())
@@ -165,12 +177,59 @@ class KnowledgeBase:
             print("[KnowledgeBase] FAILED:", self.error)
 
     def _connect_pinecone(self):
+        """Connect to the app's own Pinecone index (LIVE_APP_PINECONE_INDEX).
+        - index does not exist         -> create it (serverless, 384-dim, cosine) and wait until ready
+        - index exists and fits        -> use it
+        - index exists but is another kind (other dimension, sparse, or a document-schema index
+          with built-in embedding)     -> stop with a clear message (the app writes its own
+                                          384-dim MiniLM vectors through the vectors API)"""
         pc = Pinecone(api_key=env("PineCone_API_Key"))
-        index_name = env("Pinecone_Index_Name")
-        if index_name not in pc.list_indexes().names():
-            pc.create_index(name=index_name, dimension=384, metric="cosine",
-                            spec=ServerlessSpec(cloud="aws", region="us-east-1"))
-        self.index = pc.Index(index_name)
+        name = PINECONE_INDEX
+        self.index_name = name
+
+        if name not in pc.list_indexes().names():
+            self.status = f"creating Pinecone index '{name}'"
+            print(f"[KnowledgeBase] Pinecone index '{name}' not found - creating it "
+                  f"({EMBED_DIM}-dim, cosine, serverless {PINECONE_CLOUD}/{PINECONE_REGION})")
+            pc.create_index(name=name, dimension=EMBED_DIM, metric="cosine",
+                            spec=ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION))
+            for _ in range(60):                       # new indexes take a few seconds to be ready
+                if pc.describe_index(name).status["ready"]:
+                    break
+                time.sleep(2)
+            else:
+                raise RuntimeError(f"Pinecone index '{name}' was created but is not ready yet - restart in a minute")
+        else:
+            problems = self._index_problems(pc.describe_index(name))
+            if problems:
+                raise RuntimeError(
+                    f"Pinecone index '{name}' cannot be used by this app: {'; '.join(problems)}. "
+                    f"Set LIVE_APP_PINECONE_INDEX in .env to a new name (it will be created "
+                    f"automatically) or delete that index in the Pinecone console.")
+        self.index = pc.Index(name)
+
+    @staticmethod
+    def _index_problems(desc):
+        """Why an existing index does not fit the app ([] = it fits)."""
+        d = desc.to_dict() if hasattr(desc, "to_dict") else dict(desc)
+        serverless = (d.get("spec") or {}).get("serverless") or {}
+        problems = []
+        # Every serverless index now reports a schema; a plain vector index only has the built-in
+        # fields "_values" / "_sparse_values". Document-schema indexes add their own text fields
+        # (e.g. "chunk_text" with an integrated embedding model) and work with the documents API only.
+        fields = ((d.get("schema") or serverless.get("schema") or {}).get("fields") or {})
+        doc_fields = [f for f, spec in fields.items()
+                      if not f.startswith("_") or (isinstance(spec, dict) and spec.get("embed"))]
+        if doc_fields or d.get("embed"):
+            problems.append(f"it is a document-schema / integrated-embedding index (fields: "
+                            f"{', '.join(doc_fields) or 'embed'}; documents API only)")
+        if d.get("dimension") != EMBED_DIM:
+            problems.append(f"dimension is {d.get('dimension')}, the app's embeddings have {EMBED_DIM}")
+        if d.get("metric") not in (None, "cosine"):
+            problems.append(f"metric is {d.get('metric')}, the app needs cosine")
+        if d.get("vector_type") not in (None, "dense"):
+            problems.append(f"vector type is {d.get('vector_type')}, the app needs dense")
+        return problems
 
     def count_vectors(self):
         ns = self.index.describe_index_stats().namespaces.get(NAMESPACE)
@@ -180,10 +239,68 @@ class KnowledgeBase:
         with self._model_lock:
             return self.embedder.encode(texts)
 
+    # ------------------------------------------------------------------ data from Pinecone
+    @staticmethod
+    def chunk_from_metadata(chunk_id, meta):
+        """One chunk, rebuilt from the metadata stored with its vector (see ingestion.chunk_metadata)."""
+        return {"id": chunk_id, "year": int(meta.get("year") or 0), "page": int(meta.get("page") or 0),
+                "doc_id": meta.get("doc_id", ""), "source": meta.get("source", ""),
+                "label": meta.get("label", ""), "text": meta.get("text", ""),
+                "chunk_index": int(meta.get("chunk_index") or 0)}
+
+    def load_vectors(self):
+        """Every vector's id + metadata in the app's namespace (list ids, then fetch in batches)."""
+        ids = [item.id for page in self.index.list(namespace=NAMESPACE) for item in page]
+        records = {}
+        for start in range(0, len(ids), 100):
+            records.update(self.index.fetch(ids=ids[start:start + 100], namespace=NAMESPACE).vectors)
+        return {vid: (v.metadata or {}) for vid, v in records.items()}
+
+    def reload_from_pinecone(self, expected=None):
+        """Load ALL retrieval data from the vector database: chunk texts (for BM25, reranking and
+        the LLM), full page texts (read_policy_page tool) and document headline info
+        (list_policy_documents tool). Called at startup and after every ingestion."""
+        vectors = self.load_vectors()
+        for _ in range(10):                        # just after an ingestion Pinecone may still lag
+            if expected is None or len(vectors) == expected:
+                break
+            time.sleep(2)
+            vectors = self.load_vectors()
+
+        chunks = [self.chunk_from_metadata(vid, m) for vid, m in vectors.items() if m.get("text")]
+        chunks.sort(key=lambda c: (c["year"], c["page"], c["chunk_index"]))
+        missing_text = len(vectors) - len(chunks)
+
+        pages = sorted(({"year": int(m["year"]), "doc_id": m.get("doc_id", ""), "page": int(m["page"]),
+                         "text": m["page_text"], "source": m.get("source", "")}
+                        for m in vectors.values() if m.get("page_text")),
+                       key=lambda p: (p["year"], p["page"]))
+        docs = {}
+        for m in vectors.values():                 # one entry per document (headline CL/SL/EL)
+            if m.get("doc_id"):
+                docs.setdefault(m["doc_id"], {"year": int(m.get("year") or 0), "doc_id": m["doc_id"],
+                                              "file": m.get("source", ""),
+                                              **{k: m.get(k) for k in ("effective_from", "effective_to",
+                                                                       "cl", "sl", "el")}})
+        bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None
+
+        # swap in the new data (searches running right now keep using the old lists)
+        self.manifest = sorted(docs.values(), key=lambda d: d["year"])
+        self.pages = pages
+        self.chunk_by_id = {c["id"]: c for c in chunks}
+        self.chunks = chunks
+        self._keyword = (chunks, bm25)              # BM25 is built from the text stored in Pinecone
+        self.years = sorted({c["year"] for c in chunks if c["year"]})
+        self.vector_count = len(vectors)
+        self.needs_ingestion = not chunks or missing_text > 0
+        print(f"[KnowledgeBase] loaded from Pinecone '{self.index_name}': {len(vectors)} vectors, "
+              f"{len(chunks)} chunks with text, {len(pages)} pages, {len(docs)} documents"
+              + (f" - {missing_text} vectors without text (run Data Ingestion)" if missing_text else ""))
+
     # ------------------------------------------------------------------ ingestion
     def ingest(self):
-        """Read documents -> chunks -> embeddings -> Pinecone with document / chunk hash checks
-        (see ingestion.py), then swap the new chunks into the search indexes."""
+        """Leave_Policy documents -> chunks -> embeddings -> Pinecone with document / chunk hash
+        checks (see ingestion.py), then reload all retrieval data from Pinecone."""
         from ingestion import run_ingestion          # imported here to avoid a circular import
 
         if not self._ingest_lock.acquire(blocking=False):
@@ -191,18 +308,11 @@ class KnowledgeBase:
         self.ingesting = True
         try:
             print("[KnowledgeBase] ingestion started")
-            report, state = run_ingestion(self)
-            chunks = state["chunks"]
-            bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None
-            # swap in the new data (searches running right now keep using the old lists)
-            self.manifest = state["manifest"]
-            self.pages = state["pages"]
-            self.chunk_by_id = {c["id"]: c for c in chunks}
-            self.chunks = chunks
-            self._keyword = (chunks, bm25)
-            self.years = sorted({c["year"] for c in chunks if c["year"]})
-            self.last_ingest = report
+            report = run_ingestion(self)
             s = report["summary"]
+            self.reload_from_pinecone(expected=s["chunks"])
+            s["chunks_loaded_from_db"] = len(self.chunks)
+            self.last_ingest = report
             print(f"[KnowledgeBase] ingestion done: {s['documents']} documents, {s['chunks']} chunks, "
                   f"+{s['chunks_added']} added, {s['chunks_existing']} already stored, "
                   f"-{s['chunks_removed']} removed")
@@ -225,9 +335,16 @@ class KnowledgeBase:
 
     def vector_search(self, query, k=20, year=None):
         vector = self.embed(query).tolist()
-        result = self.index.query(vector=vector, top_k=k, namespace=NAMESPACE,
+        result = self.index.query(vector=vector, top_k=k, namespace=NAMESPACE, include_metadata=True,
                                   filter={"year": {"$eq": year}} if year else None)
-        return [(m.id, float(m.score)) for m in result.matches if m.id in self.chunk_by_id]
+        found = []
+        for m in result.matches:
+            if m.id not in self.chunk_by_id and (m.metadata or {}).get("text"):
+                # chunk added to Pinecone after the last reload: take it straight from its metadata
+                self.chunk_by_id[m.id] = self.chunk_from_metadata(m.id, m.metadata)
+            if m.id in self.chunk_by_id:
+                found.append((m.id, float(m.score)))
+        return found
 
     def hybrid_search(self, query, year=None, keyword_k=20, vector_k=20):
         """Top keyword_k BM25 chunks + top vector_k Pinecone chunks, fused with Reciprocal Rank

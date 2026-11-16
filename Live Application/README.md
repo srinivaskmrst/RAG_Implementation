@@ -10,11 +10,30 @@ pip install -r ..\requirements.txt  REM the project's single requirements file
 run.bat                             REM or: python -m uvicorn app:app --app-dir backend --port 8000
 ```
 
-Open http://localhost:8000. The first start takes ~30–60 s (PDFs, embeddings, Pinecone sync,
-reranker, loading the LLM); the status pill in the top-right turns green when ready. Keys are read
-from the project `.env` (`PineCone_API_Key`, `Pinecone_Index_Name`, and `GEMINI_API_KEY` only when
-using Gemini). Vectors go to their own Pinecone namespace `live-app`, so the notebooks' namespaces
-are untouched.
+Open http://localhost:8000. Startup takes ~30–60 s (models, loading the data from Pinecone, the
+LLM); the status pill turns green when ready. Keys are read from the project `.env`
+(`PineCone_API_Key`, and `GEMINI_API_KEY` for Gemini / Agentic RAG).
+
+## Data flow – everything comes from the Pinecone index `live-rag-app`
+
+```
+Leave_Policy/*.pdf ──(Data Ingestion page only)──► Pinecone index live-rag-app ──► all retrieval
+```
+
+* The app has its **own Pinecone index** (`LIVE_APP_PINECONE_INDEX`, default `live-rag-app`,
+  namespace `live-app-hashed`). If it does not exist it is **created automatically** (serverless,
+  384-dim, cosine). An existing index of another kind (other dimension, or a document-schema /
+  integrated-embedding index) is rejected with a clear message.
+* **Ingestion** is the only code that reads the `Leave_Policy` folder. Every vector stores all data
+  retrieval needs in its metadata: chunk text, year / page / document, the document's headline
+  CL/SL/EL days and (on the first chunk of each page) the full page text.
+* **Retrieval** reads only from Pinecone: at startup and after each ingestion the app loads every
+  vector's metadata from the index. Vector search queries Pinecone; the BM25 keyword index,
+  reranking, the LLM context and the Agentic tools (`read_policy_page`, `list_policy_documents`)
+  all use the text loaded from Pinecone. (Pinecone's dense index has no keyword search, so BM25
+  is computed in memory – but from the text stored in Pinecone, not from the files.)
+* An empty index → the status pill says "needs ingestion" and questions are refused until you
+  click **Ingest documents** on the Data Ingestion page.
 
 ## LLM: open-source (Ollama) or Gemini
 
@@ -51,7 +70,7 @@ JSON-based tool loop with Ollama models (small models make more mistakes there).
 
 ## Document ingestion (hash checks)
 
-The **Ingest documents** button (and every server start) reads all `.pdf` / `.txt` / `.md` files in
+The **Ingest documents** button on the Data Ingestion page reads all `.pdf` / `.txt` / `.md` files in
 `Leave_Policy`, splits them into chunks, embeds them and stores them in Pinecone — incrementally:
 
 1. **Document hash** – SHA-256 of the file bytes, stored as `doc_hash` in each chunk's metadata.
@@ -64,6 +83,25 @@ The **Ingest documents** button (and every server start) reads all `.pdf` / `.tx
 
 The page then shows the number of documents processed (new / changed / unchanged), total chunks,
 chunks added / already stored / removed, the vector count in Pinecone, and a per-document table.
+
+## Agentic RAG use case – Leave policy + Indian labour law (`backend/AgenticRAG.py`)
+
+Switching on **Agentic RAG** runs a **Google Gemini** agent (function calling) that decides by itself
+which knowledge source each question needs, calls the tools, checks the results and repeats:
+
+| Source | Tools |
+|---|---|
+| Company leave policy (internal, RAG) | `list_policy_documents`, `search_leave_policy` (the section's retriever + Rerank / Corrective if on), `read_policy_page` |
+| **Wikipedia – live web application** (runs on the open-source MediaWiki, public API, no key) | `search_wikipedia`, `read_wikipedia_article` |
+
+Example: *"Does our 2026 maternity leave meet the Indian Maternity Benefit Act?"* – the agent
+searches the 2026 policy (26 weeks), searches Wikipedia, reads the Maternity Benefit (Amendment)
+Act article (26 weeks), and answers that the policy meets the Act, citing `[HR-LV-2026, p.3]` and
+`[Wikipedia: …]` separately. Wikipedia sources appear in the Sources list with a link.
+
+Agentic RAG always uses the model selected in the **Gemini** dropdown (needs `GEMINI_API_KEY`).
+Wikimedia requires a User-Agent with contact details; set your own in `.env` (optional):
+`WIKIPEDIA_USER_AGENT=MyRAGApp/1.0 (https://github.com/<you>/<repo>; you@example.com)`
 
 ## What each section does
 

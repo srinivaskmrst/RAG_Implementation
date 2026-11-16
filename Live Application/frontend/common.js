@@ -13,8 +13,10 @@ async function pollStatus(onReady) {
     const s = await (await fetch("/api/status")).json();
     const box = $("status");
     if (s.ready) {
-      box.className = "status ready";
-      $("statusText").textContent = `Ready · ${s.chunks} chunks · ${s.model}`;
+      box.className = s.needs_ingestion ? "status loading" : "status ready";
+      $("statusText").textContent = s.needs_ingestion
+        ? `Vector DB '${s.index}' needs ingestion (${s.chunks} chunks) – open Data Ingestion`
+        : `Ready · ${s.chunks} chunks from Pinecone '${s.index}' · ${s.model}`;
       onReady(s);
       return;
     }
