@@ -10,9 +10,9 @@ pip install -r ..\requirements.txt  REM the project's single requirements file
 run.bat                             REM or: python -m uvicorn app:app --app-dir backend --port 8000
 ```
 
-Open http://localhost:8000. Startup takes ~30–60 s (models, loading the data from Pinecone, the
-LLM); the status pill turns green when ready. Keys are read from the project `.env`
-(`PineCone_API_Key`, and `GEMINI_API_KEY` for Gemini / Agentic RAG).
+Open http://localhost:8000. Startup takes ~30–60 s (embedding + reranker models, loading the data
+from Pinecone); the status pill turns green when ready. Keys are read from the project `.env`
+(`PineCone_API_Key` and `GEMINI_API_KEY` - both required).
 
 ## Data flow – everything comes from the Pinecone index `live-rag-app`
 
@@ -35,38 +35,50 @@ Leave_Policy/*.pdf ──(Data Ingestion page only)──► Pinecone index live
 * An empty index → the status pill says "needs ingestion" and questions are refused until you
   click **Ingest documents** on the Data Ingestion page.
 
-## LLM: open-source (Ollama) or Gemini
+## Two datasets: employee leave policy + bank documents
 
-By default the app uses an **open-source model running locally through [Ollama](https://ollama.com)**
-(no API key, no quota). Install Ollama, then download the model once:
+| Dataset | Folder | Pinecone namespace (index `live-rag-app`) | Home page button |
+|---|---|---|---|
+| Employee leave policy | `../Leave_Policy` | `live-app-hashed` | **Process RAG – Employee leave policy** |
+| Bank documents (guard-railed) | `../Bank_Documents` | `bank-docs` | **Process RAG – Bank documents** |
 
-```bat
-ollama pull phi3:mini
-```
+Folders and namespaces are configured in `DOMAINS` in `backend/core/config.py`. The **Data Ingestion**
+page has one card per dataset with **Ingest** and **Delete** buttons (*Delete employee leave policy*,
+*Delete bank data*). Delete removes every vector of that dataset only (its namespace).
+Corrective RAG and Reranking work on both datasets. Agentic RAG uses a different agent per dataset
+(leave policy: policy + live Wikipedia tools; bank: internal tools only - see below).
 
-Settings (all optional, in the project `.env`):
+## Guardrails for the banking RAG (`backend/guardrails/`)
 
-| Setting | Default | Meaning |
+Based on the bank's own Data Privacy SOP (DOC-026). Every bank question gets a 🛡 report in the
+result and an entry in `logs/bank_audit.jsonl` (git-ignored).
+
+| Stage | Guardrail |
+|---|---|
+| Ingestion | PAN, Aadhaar, account / card numbers, mobile, e-mail, date of birth **masked before embedding** – raw PII never reaches Pinecone or the LLM |
+| Ingestion | Chunks with prompt-injection text **quarantined**; classification label kept (missing → CONFIDENTIAL); files > 20 MB rejected |
+| Input | Blocks prompt injection / jailbreak, requests for OTP / PIN / CVV / password, unmasked PII, bulk PII export, another customer's data; masks PII typed into the question |
+| Access | Role chosen on the home page → metadata filter **inside the Pinecone query and the BM25 search**: Relationship manager = statements + policies, Underwriter = loan files + policies, Compliance = all, Customer = own documents only |
+| Context | Retrieved chunks re-checked (access, injection) and re-masked before the LLM; guarded system prompt (sources are data, never unmask, no advice) |
+| Output | Answer scanned and any PII masked; a customer's answer naming another customer is withheld |
+| Audit | Time, role, customer, masked question, decision, document ids |
+
+The role is picked in the UI for this demo; a real application would take it from the login.
+
+## LLM: Google Gemini
+
+Every pipeline (answers, Corrective RAG grading / rewriting, Agentic RAG) uses **Google Gemini**
+through the `google-genai` API. `GEMINI_API_KEY` must be set in the project `.env`.
+
+| Setting (`.env`) | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `ollama` | provider selected by default in the UI: `ollama` or `gemini` |
-| `OLLAMA_MODEL` | `phi3:mini` | default Ollama model |
-| `OLLAMA_NUM_CTX` | `8192` | context window given to the model |
-| `OLLAMA_URL` | `http://localhost:11434` | where Ollama runs |
-| `LIVE_LLM_MODEL` | `gemini-3.5-flash` | default Gemini model |
-| `GEMINI_API_KEY` | – | enables the Google Gemini dropdown |
+| `GEMINI_API_KEY` | – | required |
+| `LIVE_LLM_MODEL` | `gemini-2.5-flash` | model selected by default in the UI |
 
-**Model selection (two dropdowns, one model):** the home page has an **Ollama** card (every chat model
-downloaded in Ollama, plus suggested models greyed out until you run `ollama pull <name>` and press ↻)
-and a **Google Gemini** card (every Gemini text model your API key can use, read live from the API).
-Only one card is active at a time (radio button; picking a model in a dropdown activates its card).
-The active provider + model are sent with each question and used for every LLM call of that run.
-
-Ollama is unlimited but slow on a CPU (~1–2 min per answer); Gemini answers in a few seconds but the
-free tier allows only a limited number of requests per day per model.
-
-On a CPU-only laptop a local model takes roughly 20–60 s per answer, and a few minutes with
-Corrective or Agentic switched on. Agentic RAG uses Gemini's native tool calling with Gemini, and a
-JSON-based tool loop with Ollama models (small models make more mistakes there).
+The home page has one **Google Gemini** dropdown listing every Gemini text model your API key can
+use (read live from the API, ↻ reloads it). The chosen model is sent with each question and
+remembered in the browser. Temporary Gemini errors (rate limit, overload, timeout) are retried with
+back-off; the free tier allows only a limited number of requests per day per model.
 
 ## Document ingestion (hash checks)
 
@@ -84,7 +96,7 @@ The **Ingest documents** button on the Data Ingestion page reads all `.pdf` / `.
 The page then shows the number of documents processed (new / changed / unchanged), total chunks,
 chunks added / already stored / removed, the vector count in Pinecone, and a per-document table.
 
-## Agentic RAG use case – Leave policy + Indian labour law (`backend/AgenticRAG.py`)
+## Agentic RAG use case – Leave policy + Indian labour law (`backend/rag/AgenticRAG.py`)
 
 Switching on **Agentic RAG** runs a **Google Gemini** agent (function calling) that decides by itself
 which knowledge source each question needs, calls the tools, checks the results and repeats:
@@ -102,6 +114,28 @@ Act article (26 weeks), and answers that the policy meets the Act, citing `[HR-L
 Agentic RAG always uses the model selected in the **Gemini** dropdown (needs `GEMINI_API_KEY`).
 Wikimedia requires a User-Agent with contact details; set your own in `.env` (optional):
 `WIKIPEDIA_USER_AGENT=MyRAGApp/1.0 (https://github.com/<you>/<repo>; you@example.com)`
+
+## Agentic RAG for the bank documents (`backend/rag/BankAgenticRAG.py`)
+
+A Google Gemini agent that plans, calls tools and checks results - with **internal tools only**
+(no internet tools, so confidential data cannot leave through a tool call):
+
+| Tool | What it does |
+|---|---|
+| `list_bank_documents` | documents the user's role may see |
+| `search_bank_documents` | the section's retriever (+ Rerank / Corrective), limited to the role, optionally to one document |
+| `read_document_page` | full PII-masked text of one page (access-checked, injection-screened) |
+| `check_loan_against_policy` | reads a loan file and checks CIBIL band, FOIR and LTV against the Retail Lending Credit Policy (DOC-025) - staff only |
+| `calculate_emi` | EMI / total interest arithmetic |
+
+Guardrails around the agent: input checks before it starts (blocked questions never reach it);
+role filter and access check on every tool call; denied calls reported to the agent; **grounding
+guardrail** - the first step must be a tool call, and an answer citing documents no tool returned
+is discarded and replaced by the normal guarded pipeline; output masking; every tool call in the
+audit log and in the 🛡 report.
+
+Example (underwriter): *"Is Ananya Sharma's home loan within the bank's LTV and FOIR limits?"* →
+FOIR 34.3 % (limit 60 %) is within policy; LTV 76.7 % exceeds the 75 % limit for loans above INR 75 lakh.
 
 ## What each section does
 
@@ -123,15 +157,45 @@ the run time and the number of LLM calls.
 
 ## Files
 
+One file per concern:
+
 ```
-backend/ingestion.py   documents -> chunks -> embeddings -> Pinecone with document / chunk hash checks
-backend/rag_core.py    knowledge base: BM25, Pinecone, hybrid search, reranker, LLM calls (Ollama / Gemini)
-backend/pipelines.py   traditional / hybrid + rerank, corrective, agentic logic
-backend/app.py         FastAPI: GET /api/status, POST /api/ingest, POST /api/rag/{traditional|hybrid}, serves the UI
-frontend/              index.html, styles.css, app.js (no build step)
+backend/
+  app.py                        FastAPI routes: status, ingest / delete per dataset, models, RAG; serves the UI
+  core/                         shared building blocks
+    config.py                   ALL settings (.env values, datasets/DOMAINS, chunk size, models, top-K defaults)
+    utils.py                    sha256, tokenize, years_in, parse_json, matches_filter
+    embedding.py                SentenceTransformer embedder (all-MiniLM-L6-v2)
+    vector_store.py             Pinecone: create/check index, list / fetch / query / upsert / delete
+    llm.py                      Google Gemini client (ask, retries, model list)
+    knowledge_base.py           startup + each dataset's chunks / BM25 / pages loaded from Pinecone
+  ingestion/
+    document_loader.py          read PDF / TXT / MD, describe leave & bank documents
+    chunking.py                 splitter, chunk labels, chunk-hash ids, vector metadata
+    ingest.py                   incremental ingestion (document hash + chunk hash checks)
+  rag/
+    traditional_rag.py          vector search (Pinecone)
+    hybrid_rag.py               BM25 + vector search fused with RRF
+    reranking.py                cross-encoder reranker + before / after table
+    retrieval.py                retrieve(): section search + rerank + guardrail screening
+    corrective_rag.py           grade chunks, verdict, rewrite query, search again
+    AgenticRAG.py               leave-policy agent: policy tools + live Wikipedia tools
+    BankAgenticRAG.py           bank agent: internal tools only, guard-railed, grounding check
+    agent_loop.py               Gemini tool-calling loop shared by both agents
+    generation.py               final answer
+    prompts.py                  prompt texts per dataset
+    run.py                      Run: options + timed trace of one pipeline run
+    pipelines.py                run_pipeline(): orchestrates the above
+  guardrails/
+    pii_masking.py              PAN / Aadhaar / account / card / mobile / e-mail / DOB masking
+    threat_detection.py         prompt injection, secrets, unmask & bulk requests, customer names
+    access_control.py           roles -> metadata filter
+    audit_log.py                logs/bank_audit.jsonl
+    bank_guard.py               BankGuard: input -> retrieval -> output checks for one question
+frontend/                       index.html, ingest.html, styles.css, app.js, ingest.js, common.js (no build step)
 ```
 
-## Gemini quota (only with LLM_PROVIDER=gemini)
+## Gemini quota
 
 The free tier allows only ~20 requests per day per model. One base run uses 1 call per section;
 Corrective uses 2–6; Agentic 3–10 (more with Corrective on). Set `LIVE_LLM_MODEL` in `.env` to use

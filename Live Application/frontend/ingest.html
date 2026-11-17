@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Data Ingestion</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=5">
 </head>
 <body>
   <header class="topbar ingest-bar">
@@ -12,7 +12,7 @@
       <span class="logo">⬆</span>
       <div>
         <h1>Data Ingestion</h1>
-        <p>Leave_Policy documents → chunks → embeddings → Pinecone</p>
+        <p>Documents → chunks → embeddings → Pinecone (one namespace per dataset)</p>
       </div>
     </div>
     <div class="top-actions">
@@ -22,32 +22,69 @@
   </header>
 
   <main>
-    <section class="ingest card">
+    <!-- Employee leave policy -->
+    <section class="ingest card dataset-card leave" data-domain="leave">
       <div class="ingest-head">
         <div class="ingest-title">
-          <span class="ingest-icon">⬆</span>
+          <span class="ingest-icon">🧑‍💼</span>
           <div>
-            <h2>Ingest documents</h2>
-            <p class="muted">Reads every PDF / TXT / MD file in the Leave_Policy folder, splits it into chunks,
-              creates embeddings and stores them in Pinecone.</p>
+            <h2>Employee leave policy</h2>
+            <p class="muted">Folder <code>Leave_Policy</code> → Pinecone namespace <code class="ns">live-app-hashed</code>
+              · <span class="ds-count">–</span></p>
           </div>
         </div>
-        <button type="button" id="ingestBtn" class="ingest-btn" disabled>Ingest documents</button>
+        <div class="ds-actions">
+          <button type="button" class="ingest-btn" data-action="ingest" disabled>Ingest employee leave policy</button>
+          <button type="button" class="danger-btn" data-action="delete" disabled>🗑 Delete employee leave policy</button>
+        </div>
       </div>
+      <div class="ingest-result"></div>
+    </section>
 
+    <!-- Bank documents (guard-railed) -->
+    <section class="ingest card dataset-card bank" data-domain="bank">
+      <div class="ingest-head">
+        <div class="ingest-title">
+          <span class="ingest-icon">🏦</span>
+          <div>
+            <h2>Bank documents <span class="badge guardrails">Guardrails</span></h2>
+            <p class="muted">Folder <code>Bank_Documents</code> → Pinecone namespace <code class="ns">bank-docs</code>
+              · <span class="ds-count">–</span></p>
+          </div>
+        </div>
+        <div class="ds-actions">
+          <button type="button" class="ingest-btn bank" data-action="ingest" disabled>Ingest bank documents</button>
+          <button type="button" class="danger-btn" data-action="delete" disabled>🗑 Delete bank data</button>
+        </div>
+      </div>
+      <ol class="hash-steps guard-steps">
+        <li><strong>PII masking</strong> – PAN <code>XXXXX1234X</code>, Aadhaar <code>XXXX XXXX 1234</code>, account
+          numbers (last 4 digits), card numbers (first 6 + last 4), mobile, e-mail and date of birth are masked
+          <em>before</em> chunking and embedding – raw personal data never reaches Pinecone or the LLM.</li>
+        <li><strong>Prompt-injection scan</strong> – chunks that contain instructions aimed at the AI are
+          <span class="badge rejected">quarantined</span> (not stored).</li>
+        <li><strong>Classification & access metadata</strong> – every vector keeps its classification
+          (INTERNAL … HIGHLY_CONFIDENTIAL; missing → CONFIDENTIAL), customer and document category for the
+          role-based access filter at retrieval time. Files over 20 MB are rejected.</li>
+      </ol>
+      <div class="ingest-result"></div>
+    </section>
+
+    <section class="ingest card how-card">
+      <h2>How ingestion works (both datasets)</h2>
       <ol class="hash-steps">
         <li><strong>Document hash check</strong> – SHA-256 of the file. If this hash is already in the vector
           database, the document is <span class="badge unchanged">unchanged</span> and skipped.</li>
         <li><strong>Chunk hash check</strong> – for a <span class="badge new">new</span> or
           <span class="badge changed">changed</span> document, every chunk's SHA-256 is its vector id: chunks
           already in the database are skipped, only new chunks are embedded and inserted, outdated chunks are removed.</li>
+        <li><strong>Delete</strong> removes every vector of that dataset only (its whole Pinecone namespace) –
+          the other dataset is not touched. Click <em>Ingest</em> again to rebuild it.</li>
       </ol>
-
-      <div id="ingestResult"></div>
     </section>
   </main>
 
-  <script src="/static/common.js"></script>
-  <script src="/static/ingest.js"></script>
+  <script src="/static/common.js?v=4"></script>
+  <script src="/static/ingest.js?v=4"></script>
 </body>
 </html>

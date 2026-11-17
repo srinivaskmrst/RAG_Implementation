@@ -23,18 +23,24 @@ Example questions the agent can only answer by combining both sources:
   "How does our 2026 earned leave compare with the Factories Act in India?"
   "Which national holidays in India are compulsory, and how many holidays does our policy give?"
 
-Called from pipelines.run_pipeline() when the "Agentic RAG" switch is on in the UI.
+Called from rag/pipelines.py run_pipeline() when the "Agentic RAG" switch is on in the UI
+(employee leave policy only).
 """
 
 import os
 import re
 
 import httpx
-from google.genai import types
 
-from rag_core import kb, years_in
+from core.config import AGENT_MAX_STEPS        # tool-calling rounds per question (safety limit)
+from core.knowledge_base import kb
+from core.llm import llm
+from core.utils import years_in
+from rag.retrieval import retrieve
+from rag.corrective_rag import grade_chunks
+from rag.generation import generate_answer
+from rag.agent_loop import run_tool_loop
 
-AGENT_MAX_STEPS = 8                 # tool-calling rounds per question (safety limit)
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 # Wikimedia's API policy requires a User-Agent with an app name AND a contact URL or email,
 # otherwise it answers 403. Set WIKIPEDIA_USER_AGENT in .env to your own contact, e.g.
@@ -111,12 +117,12 @@ def focus_text(text, focus, max_chars=WIKI_MAX_CHARS): # Keep the intro + the pa
 
 # ---------------------------------------------------------------------------- the agent
 class LeaveComplianceAgent:
-    """One agent run. retrieve / grade_chunks / generate_answer come from pipelines.py so the
-    policy search uses exactly the section's retriever and the options chosen in the UI."""
+    """One agent run. The policy search uses exactly the section's retriever (rag/retrieval.py)
+    and the options chosen in the UI (Rerank, Corrective grading)."""
 
-    def __init__(self, run, question, retrieve, grade_chunks, generate_answer):
+    def __init__(self, run, question):
         self.run, self.question = run, question
-        self.retrieve, self.grade_chunks, self.generate_answer = retrieve, grade_chunks, generate_answer
+        self.policy = kb.corpus("leave")         # the employee leave policy dataset
         self.policy_sources = {}        # chunk id -> chunk (sources panel)
         self.web_sources = {}           # title -> {"title", "url", "text"}
         self.tools = {f.__name__: f for f in (
@@ -130,7 +136,7 @@ class LeaveComplianceAgent:
         self.run.step("Tool: list_policy_documents", "company policy overview", kind="tool")
         return {"documents": [{k: d.get(k) for k in ("year", "doc_id", "effective_from",
                                                       "effective_to", "cl", "sl", "el")}
-                              for d in kb.manifest]}
+                              for d in self.policy.manifest]}
 
     def search_leave_policy(self, query: str, year: int = 0) -> dict:
         """Search the COMPANY leave policy documents (one PDF per year, 2015-2026) and return
@@ -146,12 +152,12 @@ class LeaveComplianceAgent:
             found = years_in(str(year))
             year = found.pop() if found else 0
         self.run.step("Tool: search_leave_policy", f"query=“{query}”, year={year or 'all'}", kind="tool")
-        if year and year not in kb.years:
-            return {"error": f"No policy for {year}. Available years: {kb.years}"}
+        if year and year not in self.policy.years:
+            return {"error": f"No policy for {year}. Available years: {self.policy.years}"}
 
-        chunks = self.retrieve(self.run, str(query), year=year or None)
+        chunks = retrieve(self.run, str(query), year=year or None)
         if self.run.options.get("corrective"):     # self-corrective agent: keep only useful chunks
-            chunks = [c for c in self.grade_chunks(self.run, self.question, chunks)
+            chunks = [c for c in grade_chunks(self.run, self.question, chunks)
                       if c["grade"] != "irrelevant"]
             if not chunks:
                 return {"results": [], "note": "No relevant passages. Rephrase or try another year."}
@@ -169,7 +175,7 @@ class LeaveComplianceAgent:
         """
         year, page = int(year), int(page)
         self.run.step("Tool: read_policy_page", f"year={year}, page={page}", kind="tool")
-        for p in kb.pages:
+        for p in self.policy.pages:
             if p["year"] == year and p["page"] == page:
                 return {"source": f"[{p['doc_id']}, p.{page}]", "text": p["text"]}
         return {"error": f"Page {page} of {year} not found."}
@@ -211,40 +217,17 @@ class LeaveComplianceAgent:
         return {"source": f"[Wikipedia: {article['title']}]", "url": article["url"], "text": text}
 
     # ---- the agent loop ---------------------------------------------------------------------
-    def call_tool(self, name, args):
-        if name not in self.tools:
-            return {"error": f"Unknown tool '{name}'. Use one of: {', '.join(self.tools)}"}
-        try:
-            return self.tools[name](**args)
-        except Exception as e:               # report tool errors back so the agent can recover
-            return {"error": f"{type(e).__name__}: {e}"}
-
+    # ---- the agent loop (rag/agent_loop.py) --------------------------------------------------
     def answer(self):
         """Run the Gemini tool-calling loop. Returns (answer, policy_chunks, web_sources)."""
         run = self.run
-        config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT, temperature=0, tools=list(self.tools.values()),
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
-        history = [types.Content(role="user", parts=[types.Part.from_text(text=self.question)])]
         run.step("Agent planning", f"{run.label}: 3 company-policy tools + 2 live Wikipedia tools, "
                                    f"max {AGENT_MAX_STEPS} rounds", kind="llm")
-
-        answer = None
-        for _ in range(AGENT_MAX_STEPS):
-            run.llm_calls += 1
-            response = kb.generate(history, config, model=run.model)
-            history.append(response.candidates[0].content)
-            if not response.function_calls:          # no more tools wanted -> final answer
-                answer = response.text
-                break
-            parts = [types.Part.from_function_response(
-                         name=fc.name, response=self.call_tool(fc.name, dict(fc.args or {})))
-                     for fc in response.function_calls]
-            history.append(types.Content(role="user", parts=parts))
+        answer = run_tool_loop(run, SYSTEM_PROMPT, self.tools, self.question)
 
         policy = sorted(self.policy_sources.values(), key=lambda c: (c["year"], c["page"]))
         web = list(self.web_sources.values())
-        if answer and answer.strip():
+        if answer:
             run.step("Agent answered", f"{len(policy)} policy passages, {len(web)} Wikipedia articles",
                      kind="ok")
             return answer, policy, web
@@ -252,12 +235,12 @@ class LeaveComplianceAgent:
         # step limit reached: answer from everything gathered so far
         run.step("Step limit reached", "answering from the information gathered", kind="warn")
         if not policy and not web:
-            policy = self.retrieve(run, self.question)
+            policy = retrieve(run, self.question)
         context = policy + [{"label": f"Wikipedia: {w['title']}", "text": f"Wikipedia: {w['text']}"}
                             for w in web]
-        return self.generate_answer(run, self.question, context), policy, web
+        return generate_answer(run, self.question, context), policy, web
 
 
-def run_agent(run, question, retrieve, grade_chunks, generate_answer):
-    """Entry point used by pipelines.py."""
-    return LeaveComplianceAgent(run, question, retrieve, grade_chunks, generate_answer).answer()
+def run_agent(run, question):
+    """Entry point used by rag/pipelines.py. Returns (answer, policy_chunks, web_sources)."""
+    return LeaveComplianceAgent(run, question).answer()

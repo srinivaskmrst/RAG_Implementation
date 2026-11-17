@@ -407,7 +407,6 @@ summary:hover { filter: brightness(1.15); }
 .model-hint code { background: var(--field); padding: 1px 6px; border-radius: 6px; color: var(--text); }
 .badge.model { background: rgba(255, 255, 255, .92); color: #4c1d95; }
 
-/* ---------- two model dropdowns (Ollama / Gemini), one active ---------- */
 :root { --gem-1: #4285f4; --gem-2: #9b72cb; --gem-soft: #e8f0fe; }
 @media (prefers-color-scheme: dark) { :root { --gem-soft: #1a2747; } }
 
@@ -420,7 +419,6 @@ summary:hover { filter: brightness(1.15); }
   padding: 12px 14px; border-radius: 14px; border: 1.5px solid var(--border); background: var(--card);
   opacity: .62; transition: opacity .15s, border-color .15s, background .15s, box-shadow .15s;
 }
-.model-card.ollama { --c: var(--corrective); --cs: var(--corrective-soft); }
 .model-card.gemini { --c: var(--gem-1); --cs: var(--gem-soft); }
 .model-card:hover { opacity: .85; }
 .model-card.active { opacity: 1; border-color: var(--c); background: var(--cs); box-shadow: var(--shadow); }
@@ -443,7 +441,6 @@ summary:hover { filter: brightness(1.15); }
 .model-card select:focus { outline: none; border-color: var(--c); }
 .model-card select:disabled { cursor: not-allowed; opacity: .7; }
 .badge.model.gemini { color: #1a56c4; }
-.badge.model.ollama { color: #04724e; }
 
 @media (max-width: 900px) { .model-choices { grid-template-columns: 1fr; } }
 
@@ -515,3 +512,146 @@ summary:hover { filter: brightness(1.15); }
 .badge.web { background: var(--web-soft); color: var(--web); border: 1px solid var(--web); }
 .answer .cite.web { background: linear-gradient(115deg, var(--web), var(--gem-1)); }
 .chip.agentic-chip { --c: var(--agentic-text); --cs: var(--agentic-soft); border: 1px dashed var(--agentic); }
+
+/* =====================================================================================
+   Bank documents dataset + guardrails
+   ===================================================================================== */
+:root {
+  --bank-1: #0d9488; --bank-2: #2563eb; --bank-soft: #e0f5f2; --bank-text: #0f766e;
+  --guard: #db2777;  --guard-soft: #fde7f3; --guard-text: #a3165b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bank-soft: #0f2f2c; --bank-text: #5eead4;
+    --guard-soft: #3b1430; --guard-text: #f9a8d4;
+  }
+}
+
+/* sample rows */
+.samples-title { font-weight: 700; font-size: 12.5px; }
+.samples-title.leave { color: var(--agentic-text); }
+.samples-title.bank { color: var(--bank-text); }
+.bank-samples { margin-top: -10px; }
+.chip.bank-chip { --c: var(--bank-text); --cs: var(--bank-soft); }
+.chip.guard-chip { --c: var(--guard-text); --cs: var(--guard-soft); border: 1px dashed var(--guard); }
+
+/* guardrails panel on the home page */
+.guard-panel {
+  display: grid; grid-template-columns: 1.3fr 1fr 2fr; gap: 12px; align-items: stretch; margin-bottom: 18px;
+}
+.guard-field {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border: 1.5px solid var(--border); border-left: 5px solid var(--bank-1); border-radius: 12px; background: var(--card);
+}
+.guard-field:nth-child(2) { border-left-color: var(--bank-2); }
+.guard-field.off { opacity: .55; }
+.guard-field span { display: flex; flex-direction: column; }
+.guard-field small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.guard-field select {
+  width: 100%; padding: 7px 9px; font: inherit; font-size: 13px; color: var(--text);
+  background: var(--field); border: 1.5px solid var(--border); border-radius: 10px;
+}
+.guard-field select:focus { outline: none; border-color: var(--bank-1); box-shadow: 0 0 0 3px rgba(13, 148, 136, .2); }
+.guard-list {
+  list-style: none; margin: 0; padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 6px; align-content: center;
+  border-radius: 12px; background: var(--guard-soft); border: 1px dashed var(--guard);
+}
+.guard-list li {
+  font-size: 12px; font-weight: 600; color: var(--guard-text); padding: 2px 9px 2px 22px; position: relative;
+  background: var(--card); border-radius: 999px;
+}
+.guard-list li::before { content: "🛡"; position: absolute; left: 6px; font-size: 11px; }
+
+/* the two "Process RAG" buttons */
+.actions { flex-wrap: wrap; }
+button.run-btn.bank {
+  background: linear-gradient(110deg, var(--bank-1), var(--bank-2));
+  box-shadow: 0 6px 18px rgba(13, 148, 136, .35);
+}
+button.run-btn.bank:hover:not(:disabled) { box-shadow: 0 10px 24px rgba(13, 148, 136, .45); }
+button.run-btn.suggested { outline: 3px solid color-mix(in srgb, var(--g2) 45%, transparent); outline-offset: 2px; }
+button.run-btn.bank.suggested { outline-color: color-mix(in srgb, var(--bank-1) 50%, transparent); }
+
+/* badges */
+.badge.dataset.leave { background: var(--agentic-soft); color: var(--agentic-text); }
+.badge.dataset.bank { background: var(--bank-soft); color: var(--bank-text); }
+.badge.guardrails { background: var(--guard-soft); color: var(--guard-text); }
+.badge.cls { background: var(--field); color: var(--guard-text); border: 1px solid var(--border); font-size: 10.5px; }
+.badge.rejected { background: var(--bad-soft); color: var(--bad); }
+
+/* guardrails report in a result */
+.steps li.guard { --dot: var(--guard); }
+.steps li.blocked { --dot: var(--bad); }
+.answer.blocked { border-color: var(--bad); background: var(--bad-soft); }
+.guard-box { border-left: 4px solid var(--guard); padding: 8px 12px; border-radius: 10px; background: var(--guard-soft); }
+.guard-box.blocked { border-left-color: var(--bad); background: var(--bad-soft); }
+.guard-box summary { color: var(--guard-text); }
+.guard-box.blocked summary { color: var(--bad); }
+.guard-meta { font-size: 12.5px; color: var(--muted); margin: 8px 0; }
+.guard-meta code { background: var(--card); padding: 1px 5px; border-radius: 6px; }
+.guard-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.guard-checks li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12.5px;
+  padding: 5px 8px; border-radius: 8px; background: var(--card);
+}
+.guard-checks .g-icon { font-weight: 800; width: 14px; text-align: center; }
+.guard-checks .g-stage {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted);
+}
+.guard-checks .g-status { margin-left: auto; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.guard-checks .d { flex-basis: 100%; color: var(--muted); padding-left: 20px; }
+.guard-checks .g-pass .g-icon, .guard-checks .g-pass .g-status { color: var(--ok); }
+.guard-checks .g-masked .g-icon, .guard-checks .g-masked .g-status { color: var(--rerank-text); }
+.guard-checks .g-blocked { background: var(--bad-soft); }
+.guard-checks .g-blocked .g-icon, .guard-checks .g-blocked .g-status { color: var(--bad); }
+
+/* Data Ingestion page: one card per dataset */
+.dataset-card.bank { --ing-1: var(--bank-1); --ing-2: var(--bank-2); --ing-soft: var(--bank-soft); }
+.dataset-card .ingest-result:not(:empty) { margin-top: 16px; }
+.ds-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.ingest-btn.bank { box-shadow: 0 6px 18px rgba(13, 148, 136, .3); }
+.danger-btn {
+  flex: none; font: inherit; font-weight: 700; color: var(--bad); background: var(--bad-soft);
+  border: 1.5px solid var(--bad); border-radius: 12px; padding: 9px 16px; cursor: pointer;
+  transition: transform .12s, background .12s, color .12s;
+}
+.danger-btn:hover:not(:disabled) { background: var(--bad); color: #fff; transform: translateY(-1px); }
+.danger-btn:disabled { opacity: .5; cursor: not-allowed; }
+.guard-steps { background: var(--guard-soft); border-radius: 12px; padding: 10px 14px 10px 32px; margin: 14px 0 0; }
+.guard-steps strong { color: var(--guard-text) !important; }
+.guard-steps code { background: var(--card); padding: 0 4px; border-radius: 5px; font-size: 12px; }
+.stat.pink { --c: var(--guard); --cs: var(--guard-soft); }
+.deleted-box {
+  padding: 12px 14px; border-radius: 12px; font-size: 13.5px;
+  background: var(--bad-soft); border-left: 4px solid var(--bad);
+}
+.how-card h2 { margin: 0 0 6px; font-size: 16px; }
+
+@media (max-width: 900px) {
+  .guard-panel { grid-template-columns: 1fr; }
+  .ds-actions { justify-content: stretch; }
+}
+
+/* ---------- sample-question dropdowns (leave policy / bank documents) ---------- */
+.question-pickers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 20px; }
+.q-picker {
+  --c: var(--agentic); --cs: var(--agentic-soft); --ct: var(--agentic-text);
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border: 1.5px solid var(--border); border-left: 5px solid var(--c); border-radius: 12px; background: var(--cs);
+}
+.q-picker.bank { --c: var(--bank-1); --cs: var(--bank-soft); --ct: var(--bank-text); }
+.q-picker-title { font-weight: 700; font-size: 13px; color: var(--ct); }
+.q-picker select {
+  width: 100%; padding: 8px 10px; font: inherit; font-size: 13.5px; color: var(--text); cursor: pointer;
+  background: var(--card); border: 1.5px solid var(--border); border-radius: 10px;
+}
+.q-picker select:focus { outline: none; border-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent); }
+@media (max-width: 900px) { .question-pickers { grid-template-columns: 1fr; } }
+
+/* ---------- single Google Gemini model card ---------- */
+.model-choices.single { grid-template-columns: 1fr; }
+.model-choices.single .model-card { opacity: 1; }
+.gem-logo {
+  display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; flex: none;
+  color: #fff; font-size: 14px; background: linear-gradient(135deg, #4285f4, #a855f7 55%, #ec4899);
+}

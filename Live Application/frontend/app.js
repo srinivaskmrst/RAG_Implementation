@@ -1,8 +1,12 @@
 // RAG Playground front end: calls /api/rag/traditional and /api/rag/hybrid in parallel
 // and renders each result in its own section as soon as it arrives.
+// Two datasets: "leave" (employee leave policy) and "bank" (bank documents, with guardrails),
+// each with its own "Process RAG" button.
 
 const MODES = ["traditional", "hybrid"];
+const DATASETS = { leave: "🧑‍💼 Leave policy", bank: "🏦 Bank documents" };
 let ready = false;
+let lastDomain = "leave";
 
 // ---------------------------------------------------------------- small helpers
 // Minimal Markdown -> HTML (headings, bold/italic, code, bullet & numbered lists, citations)
@@ -69,52 +73,11 @@ function restoreTopK() {
   } catch {}
 }
 
-// ---------------------------------------------------------------- model dropdowns
-// Two dropdowns (Ollama / Google Gemini). Exactly ONE model is used per question: the one in the
-// active card (radio button). Picking a model in a dropdown makes that card active.
-const PROVIDERS = ["ollama", "gemini"];
-let activeProvider = null;
-
-function loadChoice() {
-  try { return JSON.parse(localStorage.getItem("llm") || "{}"); } catch { return {}; }
-}
-function saveChoice() {
-  try {
-    localStorage.setItem("llm", JSON.stringify({
-      provider: activeProvider, ollama: $("ollamaSelect").value, gemini: $("geminiSelect").value }));
-  } catch {}
-}
-
-function setActive(p) {
-  if (!p || $(`${p}Select`).disabled) return;          // provider not available
-  activeProvider = p;
-  $(p === "ollama" ? "useOllama" : "useGemini").checked = true;
-  $("cardOllama").classList.toggle("active", p === "ollama");
-  $("cardGemini").classList.toggle("active", p === "gemini");
-  saveChoice();
-}
-
-function fillOllama(info) {
-  const select = $("ollamaSelect");
-  if (!info.available) {
-    select.innerHTML = "<option>Ollama not available</option>";
-    select.disabled = true;
-    $("ollamaHint").textContent = info.error;
-    return [];
-  }
-  const installed = info.models.filter((m) => m.installed);
-  const missing = info.models.filter((m) => !m.installed);
-  const label = (m) => `${m.name}${m.size_gb ? ` · ${m.size_gb} GB` : ""}${m.note ? ` — ${m.note}` : ""}`;
-  select.innerHTML =
-    `<optgroup label="Downloaded (${installed.length})">${installed.map((m) =>
-      `<option value="${esc(m.name)}">${esc(label(m))}${m.name === info.default ? " (default)" : ""}</option>`).join("")}</optgroup>` +
-    (missing.length ? `<optgroup label="Not downloaded – run: ollama pull <name>">${missing.map((m) =>
-      `<option value="${esc(m.name)}" disabled>${esc(label(m))}</option>`).join("")}</optgroup>` : "");
-  select.disabled = installed.length === 0;
-  $("ollamaHint").innerHTML = missing.length
-    ? `${installed.length} downloaded. For a greyed-out model run <code>ollama pull ${esc(missing[0].name)}</code>, then press ↻.`
-    : `${installed.length} models downloaded.`;
-  return installed.map((m) => m.name);
+// ---------------------------------------------------------------- Google Gemini model dropdown
+// The app uses Google Gemini only. The model picked here is sent with every question
+// (and remembered for the next visit).
+function savedModel() {
+  try { return localStorage.getItem("geminiModel"); } catch { return null; }
 }
 
 function fillGemini(info) {
@@ -122,44 +85,63 @@ function fillGemini(info) {
   if (!info.available) {
     select.innerHTML = "<option>Gemini not available</option>";
     select.disabled = true;
-    $("geminiHint").textContent = info.error;
-    return [];
+    $("geminiHint").textContent = info.error || "Add GEMINI_API_KEY to .env";
+    return;
   }
   select.innerHTML = `<optgroup label="Gemini models (${info.models.length})">${info.models.map((m) =>
     `<option value="${esc(m.name)}">${esc(m.name)}${m.display_name && m.display_name !== m.name
       ? ` — ${esc(m.display_name)}` : ""}${m.name === info.default ? " (default)" : ""}</option>`).join("")}</optgroup>`;
   select.disabled = info.models.length === 0;
+  const names = info.models.map((m) => m.name);
+  const wanted = [savedModel(), info.default].find((n) => names.includes(n));
+  if (wanted) select.value = wanted;
   $("geminiHint").textContent = `${info.models.length} models available for your API key. ` +
     "Free tier: limited requests per day per model; some (e.g. Pro) may need a paid plan.";
-  return info.models.map((m) => m.name);
 }
 
 async function loadModels() {
-  $("ollamaSelect").disabled = $("geminiSelect").disabled = true;
+  $("geminiSelect").disabled = true;
   try {
     const res = await fetch("/api/models");
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-
-    const names = { ollama: fillOllama(data.ollama), gemini: fillGemini(data.gemini) };
-    const saved = loadChoice();
-    for (const p of PROVIDERS) {                      // restore each dropdown's last value
-      const wanted = [saved[p], data[p].default].find((n) => names[p].includes(n));
-      if (wanted) $(`${p}Select`).value = wanted;
-    }
-    const order = [saved.provider, data.default.provider, ...PROVIDERS];
-    setActive(order.find((p) => p && names[p] && names[p].length));
+    fillGemini(data);
   } catch (err) {
-    $("ollamaHint").textContent = $("geminiHint").textContent = err.message || String(err);
+    $("geminiHint").textContent = err.message || String(err);
   }
 }
 
-function options() {
+// ---------------------------------------------------------------- bank role (guardrails)
+function fillBankAccess(status) {
+  const roles = status.bank_roles || [];
+  const customers = (status.domains && status.domains.bank && status.domains.bank.customers) || [];
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("bankAccess") || "{}"); } catch {}
+  $("bankRole").innerHTML = roles.map((r) =>
+    `<option value="${esc(r.value)}" title="${esc(r.access)}">${esc(r.label)} – ${esc(r.access)}</option>`).join("");
+  $("bankCustomer").innerHTML = customers.length
+    ? customers.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")
+    : '<option value="">(ingest the bank documents first)</option>';
+  if (roles.some((r) => r.value === saved.role)) $("bankRole").value = saved.role;
+  if (customers.includes(saved.customer)) $("bankCustomer").value = saved.customer;
+  updateCustomerField();
+}
+
+function updateCustomerField() {
+  const isCustomer = $("bankRole").value === "customer";
+  $("bankCustomer").disabled = !isCustomer;
+  $("customerField").classList.toggle("off", !isCustomer);
+  try {
+    localStorage.setItem("bankAccess", JSON.stringify({ role: $("bankRole").value, customer: $("bankCustomer").value }));
+  } catch {}
+}
+
+function options(domain) {
   return {
-    provider: activeProvider,
-    model: activeProvider ? $(`${activeProvider}Select`).value : null,
-    // Agentic RAG (AgenticRAG.py) always uses Google Gemini: send the Gemini dropdown's model
-    gemini_model: $("geminiSelect").disabled ? null : $("geminiSelect").value,
+    domain,
+    role: $("bankRole").value || undefined,
+    customer: $("bankRole").value === "customer" ? $("bankCustomer").value : null,
+    model: $("geminiSelect").disabled ? null : $("geminiSelect").value,   // Google Gemini model
     rerank: $("optRerank").checked,
     corrective: $("optCorrective").checked,
     agentic: $("optAgentic").checked,
@@ -176,21 +158,58 @@ function topkBadge(k) {
 function techniqueBadges(opts) {
   const names = [["rerank", "Rerank"], ["corrective", "Corrective"], ["agentic", "Agentic"]]
     .filter(([k]) => opts[k]).map(([k, n]) => `<span class="badge ${k}">${n}</span>`);
+  if (opts.domain === "bank") names.push('<span class="badge guardrails">Guardrails</span>');
   return names.join("") || '<span class="badge plain">Base</span>';
+}
+
+function datasetBadge(domain) {
+  return `<span class="badge dataset ${esc(domain)}">${esc(DATASETS[domain] || domain)}</span>`;
 }
 
 // ---------------------------------------------------------------- rendering
 function renderLoading(section, opts) {
-  // Agentic RAG always runs on the model in the Gemini dropdown
-  const provider = opts.agentic ? "gemini" : opts.provider;
-  const model = opts.agentic ? opts.gemini_model : opts.model;
-  setMeta(section, (model ? `<span class="badge model ${esc(provider)}">${esc(model)}</span>` : "") + techniqueBadges(opts));
+  const bank = opts.domain === "bank";
+  setMeta(section, datasetBadge(opts.domain) +
+    (opts.model ? `<span class="badge model gemini">${esc(opts.model)}</span>` : "") +
+    techniqueBadges(opts));
   section.querySelector(".body").innerHTML = `
     <div class="skeleton"><span></span><span></span><span></span></div>
-    <p class="running">Running pipeline${opts.agentic
-      ? " – Gemini agent is searching the company policy and live Wikipedia" : ""}…</p>
-    ${provider === "ollama" ? `<p class="running muted">Local model on CPU: this can take ${
-      opts.agentic || opts.corrective ? "a few minutes" : "up to a minute"}.</p>` : ""}`;
+    <p class="running">Running pipeline on ${esc(DATASETS[opts.domain])}${opts.agentic
+      ? (bank ? " – Gemini agent is using the internal bank tools (guardrails on)"
+              : " – Gemini agent is searching the company policy and live Wikipedia")
+      : bank ? " – guardrails on" : ""}…</p>`;
+}
+
+// Guardrails report (bank documents): every input / output check, access filter, audit entry
+function renderGuardrails(g) {
+  if (!g) return "";
+  const icon = { pass: "✓", masked: "◐", blocked: "✕" };
+  const checks = g.checks.map((c) => `
+    <li class="g-${esc(c.status)}">
+      <span class="g-icon">${icon[c.status] || "•"}</span>
+      <span class="g-stage">${esc(c.stage)}</span>
+      <strong>${esc(c.name)}</strong>
+      <span class="g-status">${esc(c.status)}</span>
+      ${c.detail ? `<span class="d">${esc(c.detail)}</span>` : ""}
+    </li>`).join("");
+  const s = g.stats || {};
+  return `
+    <details class="guard-box ${g.blocked ? "blocked" : ""}" open>
+      <summary>🛡 Guardrails · ${esc(g.role)} · ${g.blocked ? "request BLOCKED" : "passed"}</summary>
+      <p class="guard-meta">Access: <strong>${esc(g.access)}</strong>${g.audit_id
+        ? ` · audit entry <code>${esc(g.audit_id)}</code> in <code>${esc(g.audit_log)}</code>` : ""}</p>
+      <ul class="guard-checks">${checks}</ul>
+      ${g.tool_calls && g.tool_calls.length ? `
+        <p class="guard-meta">Agent tool calls (all inside the role filter, written to the audit log):</p>
+        <ul class="guard-checks">${g.tool_calls.map((t) => `
+          <li class="g-${t.result === "denied" ? "blocked" : "pass"}">
+            <span class="g-icon">${t.result === "denied" ? "✕" : "⚙"}</span>
+            <strong>${esc(t.tool)}</strong><span class="d">${esc(t.args)} → ${esc(t.result)}</span>
+          </li>`).join("")}</ul>` : ""}
+      ${g.blocked ? "" : `<p class="guard-meta">Retrieval: ${s.chunks_checked} chunks screened ·
+        ${s.access_dropped} dropped by access · ${s.injection_dropped} dropped (injection) ·
+        ${s.chunks_remasked} re-masked · ${s.output_masked} PII value(s) masked in the answer</p>`}
+    </details>`;
 }
 
 function renderError(section, message) {
@@ -255,6 +274,7 @@ function renderReranking(reranks) {
 function renderResult(section, r) {
   const verdictClass = { CORRECT: "ok", AMBIGUOUS: "warn", INCORRECT: "bad" }[r.verdict] || "";
   setMeta(section, `
+    ${datasetBadge(r.domain)}
     ${r.techniques.length ? r.techniques.map((t) => `<span class="badge ${esc(t.toLowerCase())}">${esc(t)}</span>`).join("")
                           : '<span class="badge plain">Base</span>'}
     ${r.verdict ? `<span class="badge ${verdictClass}">${esc(r.verdict)}</span>` : ""}
@@ -282,7 +302,8 @@ function renderResult(section, r) {
     </div>` : `
     <div class="source ${esc(s.grade || "")}">
       <div class="head">
-        <strong>[${i + 1}] Leave Policy ${s.year} · p.${s.page}</strong>
+        <strong>[${i + 1}] ${esc(s.title || `Leave Policy ${s.year} · p.${s.page}`)}</strong>
+        ${s.classification ? `<span class="badge cls">${esc(s.classification)}</span>` : ""}
         ${s.score != null ? `<span class="badge score">${esc(s.score_name)} ${s.score}</span>` : ""}
         ${s.grade ? `<span class="badge ${gradeClass[s.grade] || ""}">${esc(s.grade)}</span>` : ""}
       </div>
@@ -290,7 +311,8 @@ function renderResult(section, r) {
     </div>`).join("");
 
   section.querySelector(".body").innerHTML = `
-    <div class="answer">${markdown(r.answer)}</div>
+    <div class="answer ${r.guardrails && r.guardrails.blocked ? "blocked" : ""}">${markdown(r.answer)}</div>
+    ${renderGuardrails(r.guardrails)}
     ${renderReranking(r.reranking)}
     <details open>
       <summary>Pipeline steps (${r.steps.length})</summary>
@@ -320,28 +342,36 @@ async function runMode(mode, question, opts) {
   }
 }
 
-async function run(event) {
-  event?.preventDefault();
-  const question = $("question").value.trim();
-  if (!ready || question.length < 2) return;
+const RUN_BUTTONS = { leave: "runLeave", bank: "runBank" };
+let running = false;
 
+// domain = "leave" (Process RAG – Employee leave policy) or "bank" (Process RAG – Bank documents)
+async function run(domain) {
+  const question = $("question").value.trim();
+  if (!ready || running || question.length < 2) {
+    if (question.length < 2) $("question").focus();
+    return;
+  }
   let opts;
   try {
-    opts = options();
+    opts = options(domain);
   } catch (err) {
     selectedModes().forEach((m) => renderError($(m), err.message));
     return;
   }
-  $("askBtn").disabled = true;
-  $("askBtn").textContent = "Running…";
+  lastDomain = domain;
+  running = true;
+  const btn = $(RUN_BUTTONS[domain]);
+  const label = btn.innerHTML;
+  Object.values(RUN_BUTTONS).forEach((id) => { $(id).disabled = true; });
+  btn.textContent = "Running…";
   await Promise.all(selectedModes().map((m) => runMode(m, question, opts)));
-  $("askBtn").disabled = false;
-  $("askBtn").textContent = RUN_LABELS[runChoice()];
+  btn.innerHTML = label;
+  Object.values(RUN_BUTTONS).forEach((id) => { $(id).disabled = false; });
+  running = false;
 }
 
 // ---------------------------------------------------------------- which pipelines to run
-const RUN_LABELS = { traditional: "Run Traditional RAG", hybrid: "Run Hybrid RAG", both: "Run both pipelines" };
-
 function runChoice() {
   return document.querySelector('input[name="runMode"]:checked')?.value || "both";
 }
@@ -356,7 +386,6 @@ function updateRunMode() {
   const choice = runChoice();
   for (const m of MODES) $(m).hidden = !selectedModes().includes(m);
   document.querySelector(".results").classList.toggle("single", choice !== "both");
-  if (!$("askBtn").textContent.startsWith("Running")) $("askBtn").textContent = RUN_LABELS[choice];
   try { localStorage.setItem("runMode", choice); } catch {}
 }
 
@@ -369,22 +398,40 @@ function restoreRunMode() {
 }
 
 // ---------------------------------------------------------------- wiring
-$("askForm").addEventListener("submit", run);
+$("askForm").addEventListener("submit", (e) => { e.preventDefault(); run("leave"); });
+$("runBank").addEventListener("click", () => run("bank"));
 $("question").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(e);
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(lastDomain); }
 });
-document.querySelectorAll("#samples .chip").forEach((chip) =>
-  chip.addEventListener("click", () => {
-    $("question").value = chip.textContent.replace(/^✦\s*/, "");
-    if (chip.classList.contains("agentic-chip")) $("optAgentic").checked = true;   // needs the agent
+// two sample-question dropdowns: picking one fills the question box, sets the options it needs
+// (Agentic for the ✦ questions, the bank role / customer for bank questions) and highlights the
+// matching "Process RAG" button. Only one dropdown shows a selection at a time.
+const QUESTION_PICKERS = ["leaveQuestions", "bankQuestions"];
+QUESTION_PICKERS.forEach((id) =>
+  $(id).addEventListener("change", () => {
+    const select = $(id);
+    const opt = select.selectedOptions[0];
+    if (!opt || !opt.value) return;
+    QUESTION_PICKERS.filter((other) => other !== id).forEach((other) => { $(other).value = ""; });
+    $("question").value = opt.value.replace(/^\(as [^)]*\)\s*/, "");      // "(as customer …)" is a hint only
+    if (opt.dataset.agentic) $("optAgentic").checked = true;                       // needs the agent
+    if (opt.dataset.role && [...$("bankRole").options].some((o) => o.value === opt.dataset.role)) {
+      $("bankRole").value = opt.dataset.role;                                       // demo: switch role
+      if (opt.dataset.customer) $("bankCustomer").value = opt.dataset.customer;
+      updateCustomerField();
+    }
+    lastDomain = select.dataset.domain;
+    Object.entries(RUN_BUTTONS).forEach(([d, b]) => $(b).classList.toggle("suggested", d === lastDomain));
     $("question").focus();
   }));
+// typing your own question clears the dropdown selection
+$("question").addEventListener("input", () => QUESTION_PICKERS.forEach((id) => { $(id).value = ""; }));
+$("bankRole").addEventListener("change", updateCustomerField);
+$("bankCustomer").addEventListener("change", updateCustomerField);
 
-for (const p of PROVIDERS) {
-  $(`${p}Select`).addEventListener("change", () => setActive(p));       // picking a model selects its card
-  $(`${p}Select`).addEventListener("focus", () => setActive(p));
-  $(p === "ollama" ? "useOllama" : "useGemini").addEventListener("change", () => setActive(p));
-}
+$("geminiSelect").addEventListener("change", () => {                    // remember the model
+  try { localStorage.setItem("geminiModel", $("geminiSelect").value); } catch {}
+});
 $("modelRefresh").addEventListener("click", loadModels);
 document.querySelectorAll('input[name="runMode"]').forEach((r) => r.addEventListener("change", updateRunMode));
 
@@ -393,5 +440,6 @@ restoreRunMode();
 loadModels();
 pollStatus((s) => {
   ready = true;
-  $("askBtn").disabled = false;
+  fillBankAccess(s);
+  Object.values(RUN_BUTTONS).forEach((id) => { $(id).disabled = false; });
 });
