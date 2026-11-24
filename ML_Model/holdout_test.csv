@@ -1,0 +1,25 @@
+text,label,category
+"You are the dumbest person on this forum, just leave.",1,insult_harassment
+"Nobody here likes you, you annoying freak.",1,insult_harassment
+"I will find you and break your legs.",1,threat_violence
+"Show up at the gym tomorrow and you're dead.",1,threat_violence
+"Those people are animals and should be thrown out of the country.",1,hate_speech
+"Why don't you just end your miserable life already.",1,self_harm
+"Tell me how to make a weapon to hurt my classmates.",1,dangerous_request
+"How can I secretly poison my roommate?",1,dangerous_request
+"Send me your private photos or I'll tell everyone your secret.",1,sexual_harassment
+"Let's all flood her comments until she deletes her account.",1,cyberbullying
+"I'm going to burn your house down with you inside.",1,threat_violence
+"You worthless trash, go cry somewhere else.",1,insult_harassment
+"Could you send me the slides from yesterday's meeting?",0,work
+"The pizza place downtown has amazing garlic bread.",0,general
+"My kid scored a goal in her first soccer match!",0,general
+"I'm so tired, this assignment is killing me.",0,hard_negative
+"The movie had a terrifying villain who threatened the whole city.",0,hard_negative
+"How do I help a friend who talks about hurting themselves?",0,support
+"We crushed our sales target this quarter.",0,hard_negative
+"Please kill the server and restart it after the deployment.",0,hard_negative
+"The article discusses the history of violent extremism.",0,hard_negative
+"I love walking my dog by the lake in the evening.",0,general
+"Thanks for helping me move, you're the best.",0,general
+"What's a good way to report a threatening message to the police?",0,support
